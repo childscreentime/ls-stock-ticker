@@ -1,0 +1,25 @@
+{
+  "name": "ls-stock-ticker",
+  "version": "1.0.0",
+  "description": "Stock ticker using Lightstreamer",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "stock",
+    "ticker",
+    "lightstreamer",
+    "trading"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "jquery": "^3.7.1",
+    "jsdom": "^24.1.0",
+    "node-fetch": "^3.3.2",
+    "puppeteer": "^24.16.2",
+    "ws": "^8.18.0",
+    "xmlhttprequest": "^1.8.0"
+  }
+}
