@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LS Stock Ticker - Options</title>
+    <link rel="stylesheet" href="styles/options.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📈 LS Stock Ticker - Options</h1>
+            <p>Configure your watchlist, alerts, and webhooks</p>
+        </header>
+
+        <main>
+            <!-- Watchlist Configuration -->
+            <section class="config-section">
+                <h2>📋 Watchlist Configuration</h2>
+                <p>Add instruments to monitor by ISIN or WKN</p>
+                
+                <div class="add-instrument">
+                    <div class="input-group">
+                        <input type="text" id="isinInput" placeholder="Enter ISIN (e.g., US67066G1040)" />
+                        <button id="addInstrumentBtn" class="btn btn-primary">Add Instrument</button>
+                    </div>
+                    <div id="addInstrumentStatus" class="status-message"></div>
+                </div>
+
+                <div class="watchlist-table">
+                    <table id="watchlistTable">
+                        <thead>
+                            <tr>
+                                <th>WKN</th>
+                                <th>Name</th>
+                                <th>ISIN</th>
+                                <th>ID</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="watchlistBody">
+                            <tr><td colspan="5" class="loading">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Alert Rules Configuration -->
+            <section class="config-section">
+                <h2>🔔 Alert Rules</h2>
+                <p>Configure alert thresholds and notifications for each instrument</p>
+                
+                <div id="alertRulesContainer" class="alert-rules">
+                    <div class="loading">Loading...</div>
+                </div>
+            </section>
+
+            <!-- Webhook Configuration -->
+            <section class="config-section">
+                <h2>📤 Webhook Configuration</h2>
+                <p>Send events to external services like Discord or Telegram</p>
+                
+                <div class="webhook-config">
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="webhookEnabled"> Enable Webhooks
+                        </label>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="webhookType">Webhook Type:</label>
+                        <select id="webhookType">
+                            <option value="generic">Generic JSON</option>
+                            <option value="discord">Discord</option>
+                            <option value="telegram">Telegram</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="webhookUrl">Webhook URL:</label>
+                        <input type="url" id="webhookUrl" placeholder="https://..." />
+                    </div>
+
+                    <div class="form-group webhook-token" style="display: none;">
+                        <label for="webhookToken">Bot Token:</label>
+                        <input type="password" id="webhookToken" placeholder="Bot token or API key" />
+                    </div>
+
+                    <div class="form-group webhook-channels" style="display: none;">
+                        <label for="tradeChannel">Trade Channel/Chat ID:</label>
+                        <input type="text" id="tradeChannel" placeholder="Channel or chat ID for trades" />
+                        
+                        <label for="alertChannel">Alert Channel/Chat ID:</label>
+                        <input type="text" id="alertChannel" placeholder="Channel or chat ID for alerts" />
+                    </div>
+
+                    <div class="webhook-actions">
+                        <button id="testWebhookBtn" class="btn btn-secondary">Test Webhook</button>
+                        <div id="webhookStatus" class="status-message"></div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer>
+            <div class="save-actions">
+                <button id="saveBtn" class="btn btn-primary btn-large">Save Configuration</button>
+                <button id="resetBtn" class="btn btn-secondary">Reset to Defaults</button>
+            </div>
+            <div id="saveStatus" class="status-message"></div>
+        </footer>
+    </div>
+
+    <script type="module" src="options.js"></script>
+</body>
+</html>

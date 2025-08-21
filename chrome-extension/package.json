@@ -1,0 +1,32 @@
+{
+  "name": "ls-stock-ticker-extension",
+  "version": "1.0.0",
+  "description": "Chrome extension for real-time stock monitoring with alerting from ls-tc.de",
+  "main": "background.js",
+  "scripts": {
+    "test": "echo \"No tests specified\"",
+    "lint": "eslint ."
+  },
+  "keywords": [
+    "chrome-extension",
+    "stock-ticker",
+    "lightstreamer",
+    "real-time",
+    "alerts",
+    "finance",
+    "trading"
+  ],
+  "author": "LS Stock Ticker Team",
+  "license": "MIT",
+  "devDependencies": {
+    "eslint": "^8.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "."
+  },
+  "bugs": {
+    "url": "https://github.com/your-repo/issues"
+  },
+  "homepage": "https://github.com/your-repo#readme"
+}
