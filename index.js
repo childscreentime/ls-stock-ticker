@@ -1,4 +1,5 @@
 const puppeteer = require('puppeteer');
+const TradingEventHandler = require('./tradingEventHandler');
 
 // Use built-in fetch for Node.js 18+ or import node-fetch
 const fetch = global.fetch || require('node-fetch');
@@ -156,16 +157,35 @@ async function main() {
 
     console.log('📊 Setting up Multi-Stock Lightstreamer Logger...');
 
-    await page.evaluate((stockWatchlist) => {
-        console.log('[BROWSER LOG]: 📊 Setting up Lightstreamer-Push Logger...');
+    // Read the TradingEventHandler code to inject into browser
+    const fs = require('fs');
+    const path = require('path');
+    const tradingEventHandlerCode = fs.readFileSync(path.join(__dirname, 'tradingEventHandler.js'), 'utf8');
+
+    // Debug configuration
+    const DEBUG_MODE = process.env.DEBUG === 'true' || false; // Set to true to enable debug logging
+
+    await page.evaluate((stockWatchlist, TradingEventHandlerCode, debugMode) => {
+        // Debug logging helper
+        function debugLog(message) {
+            if (debugMode) {
+                console.log(`[BROWSER LOG]: ${message}`);
+            }
+        }
+        
+        debugLog('📊 Setting up Lightstreamer-Push Logger...');
+        
+        // Initialize the TradingEventHandler in browser context
+        eval(TradingEventHandlerCode);
+        const tradingHandler = new TradingEventHandler();
         
         // Check if LightstreamerClient exists
         if (typeof LightstreamerClient === 'undefined') {
-            console.log('[BROWSER LOG]: ❌ LightstreamerClient not found!');
+            debugLog('❌ LightstreamerClient not found!');
             return;
         }
         
-        console.log('[BROWSER LOG]: ✅ LightstreamerClient found!');
+        debugLog('✅ LightstreamerClient found!');
         
         // Get the existing client - try multiple ways to find it
         let client = window.lsClient || window.lightstreamerClient || window.client;
@@ -182,32 +202,72 @@ async function main() {
             
             if (possibleClients.length > 0) {
                 client = window[possibleClients[0]];
-                console.log(`[BROWSER LOG]: 🔍 Found client via: ${possibleClients[0]}`);
+                debugLog(`🔍 Found client via: ${possibleClients[0]}`);
             }
         }
         
         // If still not found, create a new client
         if (!client) {
-            console.log('[BROWSER LOG]: 🔧 Creating new LightstreamerClient...');
+            debugLog('🔧 Creating new LightstreamerClient...');
             client = new LightstreamerClient("https://push.ls-tc.de:443", "WALLSTREETONLINE");
         }
         
-        console.log(`[BROWSER LOG]: 🔗 Connected to: https://push.ls-tc.de:443`);
-        console.log(`[BROWSER LOG]: 🔗 Adapter: WALLSTREETONLINE`);
+        debugLog(`🔗 Connected to: https://push.ls-tc.de:443`);
+        debugLog(`🔗 Adapter: WALLSTREETONLINE`);
+        
+        // Add connection status listener for monitoring
+        if (client.addListener) {
+            client.addListener({
+                onStatusChange: function(status) {
+                    debugLog(`📊 Connection status changed: ${status}`);
+                    
+                    // Handle connection loss
+                    if (status.includes('DISCONNECTED') && !status.includes('WILL-RETRY')) {
+                        debugLog('⚠️ Connection lost, attempting to reconnect...');
+                        setTimeout(() => {
+                            if (client.connect) client.connect();
+                        }, 2000);
+                    }
+                },
+                onServerError: function(errorCode, errorMessage) {
+                    debugLog(`❌ Server error: ${errorCode} - ${errorMessage}`);
+                }
+            });
+        }
         
         // Wait for client to be connected
         function waitForConnection() {
-            const status = client.getStatus ? client.getStatus() : 'CONNECTING';
-            console.log(`[BROWSER LOG]: 📊 Client status: ${status}`);
+            const status = client.getStatus ? client.getStatus() : 'UNKNOWN';
+            debugLog(`📊 Client status: ${status}`);
             
             if (status.includes('CONNECTED') && (status.includes('STREAMING') || status.includes('POLLING'))) {
-                console.log('[BROWSER LOG]: 🎉 Connected! Setting up subscriptions...');
-                setupLightstreamerPush();
+                debugLog('🎉 Connected! Setting up subscriptions...');
+                try {
+                    setupLightstreamerPush();
+                    debugLog('✅ Subscription setup completed successfully!');
+                } catch (error) {
+                    debugLog(`❌ Error during subscription setup: ${error.message}`);
+                    debugLog(`❌ Error stack: ${error.stack}`);
+                }
             } else if (status === 'DISCONNECTED') {
-                console.log('[BROWSER LOG]: 🔄 Client disconnected, connecting...');
+                debugLog('🔄 Client disconnected, connecting...');
                 if (client.connect) client.connect();
                 setTimeout(waitForConnection, 1000);
+            } else if (status.includes('DISCONNECTED:WILL-RETRY')) {
+                debugLog('⏳ Client will retry connection...');
+                setTimeout(waitForConnection, 2000);
+            } else if (status.includes('DISCONNECTED:TRYING-RECOVERY')) {
+                debugLog('🔄 Client trying to recover connection...');
+                setTimeout(waitForConnection, 2000);
+            } else if (status.includes('STALLED')) {
+                debugLog('⚠️ Connection stalled, forcing reconnect...');
+                if (client.disconnect) client.disconnect();
+                setTimeout(() => {
+                    if (client.connect) client.connect();
+                }, 1000);
+                setTimeout(waitForConnection, 3000);
             } else {
+                debugLog(`⏳ Waiting for connection... Status: ${status}`);
                 setTimeout(waitForConnection, 1000);
             }
         }
@@ -281,11 +341,145 @@ async function main() {
                 return originalDateParse(dateString);
             };
             
+            // Initialize price tracking dictionary and trade history management
+            const priceDict = {}; // { timestamp: { bid: value, ask: value } }
+            let lastAnalyzedTradeTimestamp = null; // Track last processed trade timestamp
+            let lastKnownBidAsk = { bid: null, ask: null }; // Keep last known bid/ask for reference
+            
+            // Heartbeat mechanism to detect when data stops flowing
+            let lastDataReceived = Date.now();
+            let heartbeatInterval;
+            
+            function startHeartbeat() {
+                if (heartbeatInterval) clearInterval(heartbeatInterval);
+                
+                heartbeatInterval = setInterval(() => {
+                    const timeSinceLastData = Date.now() - lastDataReceived;
+                    const minutes = Math.floor(timeSinceLastData / 60000);
+                    
+                    if (timeSinceLastData > 300000) { // 5 minutes
+                        checkMarketStatus(); // Check if this is expected
+                        debugLog(`⚠️ No data received for ${minutes} minutes. Connection may be stale.`);
+                        
+                        // Try to reconnect after 5 minutes of no data
+                        if (timeSinceLastData > 300000) {
+                            debugLog('🔄 Forcing reconnection due to stale data...');
+                            if (client.disconnect) client.disconnect();
+                            setTimeout(() => {
+                                if (client.connect) client.connect();
+                            }, 2000);
+                        }
+                    }
+                }, 60000); // Check every minute
+            }
+            
+            function updateHeartbeat() {
+                lastDataReceived = Date.now();
+            }
+            
+            // Check if we're in market hours (rough approximation for European markets)
+            function isMarketHours() {
+                const now = new Date();
+                const hour = now.getHours();
+                const day = now.getDay(); // 0 = Sunday, 6 = Saturday
+                
+                // Skip weekends
+                if (day === 0 || day === 6) return false;
+                
+                // European market hours (roughly 8:00 - 18:00 CET)
+                return hour >= 8 && hour <= 18;
+            }
+            
+            function checkMarketStatus() {
+                if (!isMarketHours()) {
+                    debugLog('ℹ️ Outside market hours - reduced data flow is normal');
+                }
+            }
+            
+            // Function to clean up old price history after trade analysis
+            function cleanPriceHistory(afterTimestamp) {
+                const timestamps = Object.keys(priceDict);
+                let removedCount = 0;
+                
+                for (const ts of timestamps) {
+                    if (ts <= afterTimestamp) {
+                        // Keep the last known bid/ask before removing
+                        if (priceDict[ts].bid) lastKnownBidAsk.bid = priceDict[ts].bid;
+                        if (priceDict[ts].ask) lastKnownBidAsk.ask = priceDict[ts].ask;
+                        
+                        delete priceDict[ts];
+                        removedCount++;
+                    }
+                }
+                
+                if (removedCount > 0) {
+                    debugLog(`🧹 CLEANED: Removed ${removedCount} old price records after ${afterTimestamp}`);
+                    debugLog(`🧹 KEPT: Last known BID ${lastKnownBidAsk.bid}, ASK ${lastKnownBidAsk.ask}`);
+                    debugLog(`🧹 REMAINING: ${Object.keys(priceDict).length} active price records`);
+                }
+            }
+            
+            // Function to determine if a price was a buy or sell before given timestamp
+            function getBuyOrSellBefore(price, timestamp) {
+                const sortedTimestamps = Object.keys(priceDict).sort().reverse(); // Latest first
+                
+                debugLog(`🔍 ANALYZING: Trade ${price} at ${timestamp}`);
+                debugLog(`🔍 SEARCHING: ${sortedTimestamps.length} price records + last known bid/ask`);
+                
+                // Check all historical price data before the trade timestamp
+                for (const ts of sortedTimestamps) {
+                    if (ts < timestamp) {
+                        const priceData = priceDict[ts];
+                        
+                        debugLog(`🔍 CHECKING: Trade ${price} vs BID ${priceData.bid} ASK ${priceData.ask} at ${ts}`);
+                        
+                        // Check if price matches ask (BUY - someone bought at ask price)
+                        if (priceData.ask && Math.abs(priceData.ask - price) < 0.0001) {
+                            debugLog(`🔍 MATCH: Trade ${price} matched ASK ${priceData.ask} at ${ts} → BUY`);
+                            
+                            // Update last analyzed trade timestamp and clean history
+                            lastAnalyzedTradeTimestamp = timestamp;
+                            cleanPriceHistory(ts);
+                            
+                            return "BUY";
+                        }
+                        
+                        // Check if price matches bid (SELL - someone sold at bid price)
+                        if (priceData.bid && Math.abs(priceData.bid - price) < 0.0001) {
+                            debugLog(`🔍 MATCH: Trade ${price} matched BID ${priceData.bid} at ${ts} → SELL`);
+                            
+                            // Update last analyzed trade timestamp and clean history
+                            lastAnalyzedTradeTimestamp = timestamp;
+                            cleanPriceHistory(ts);
+                            
+                            return "SELL";
+                        }
+                    }
+                }
+                
+                // Also check against last known bid/ask if no match found in active records
+                if (lastKnownBidAsk.ask && Math.abs(lastKnownBidAsk.ask - price) < 0.0001) {
+                    debugLog(`🔍 MATCH: Trade ${price} matched LAST KNOWN ASK ${lastKnownBidAsk.ask} → BUY`);
+                    lastAnalyzedTradeTimestamp = timestamp;
+                    return "BUY";
+                }
+                
+                if (lastKnownBidAsk.bid && Math.abs(lastKnownBidAsk.bid - price) < 0.0001) {
+                    debugLog(`🔍 MATCH: Trade ${price} matched LAST KNOWN BID ${lastKnownBidAsk.bid} → SELL`);
+                    lastAnalyzedTradeTimestamp = timestamp;
+                    return "SELL";
+                }
+                
+                debugLog(`🔍 NO MATCH: Trade ${price} at ${timestamp} - no matching bid/ask found`);
+                lastAnalyzedTradeTimestamp = timestamp;
+                return "N/A";
+            }
+            
             // Initialize the modified lightstreamer-push
             const lightstreamerPush = (function(a) {
                 function n(b, d, f, g, c, n) {
                     // Instead of b.html(d), log the HTML change
-                    console.log(`[BROWSER LOG]: 📊 HTML UPDATE: ${b.selector} = "${d}" ${f ? `(${f}: ${c})` : ''} ${n ? `[trend: ${n}]` : ''}`);
+                    debugLog(`📊 HTML UPDATE: ${b.selector} = "${d}" ${f ? `(${f}: ${c})` : ''} ${n ? `[trend: ${n}]` : ''}`);
                     
                     var k;
                     a.push.animation || "background" != f || (f = !1);
@@ -296,10 +490,10 @@ async function main() {
                             // Log the animation/styling that would be applied
                             switch (f) {
                             case "background":
-                                console.log(`[BROWSER LOG]: 🎨 BACKGROUND ANIMATION: ${b.selector} - color: ${g}, bg: ${c}, trend: ${n}`);
+                                debugLog(`🎨 BACKGROUND ANIMATION: ${b.selector} - color: ${g}, bg: ${c}, trend: ${n}`);
                                 break;
                             case "color":
-                                console.log(`[BROWSER LOG]: 🎨 COLOR CHANGE: ${b.selector} - color: ${c}`);
+                                debugLog(`🎨 COLOR CHANGE: ${b.selector} - color: ${c}`);
                             }
                         }
                     });
@@ -385,7 +579,7 @@ async function main() {
                 };
 
                 a.push.quotes = function() {
-                    console.log("[BROWSER LOG]: 📊 Setting up QUOTES subscription...");
+                    debugLog("📊 Setting up QUOTES subscription...");
                     a.push.enabled = !0;
                     a.push.selectorCache = {};
                     a.push.oldValues = {};
@@ -403,30 +597,77 @@ async function main() {
                         a.push.quoteSubscription = new Subscription("MERGE", a.push.quoteItemList, a.push.quoteFieldList);
                         a.push.quoteSubscription.addListener({
                             onSubscriptionError: function(code, message) {
-                                console.log(`[BROWSER LOG]: SUBSCRIPTION ERROR: ${code} - ${message}`);
+                                debugLog(`SUBSCRIPTION ERROR: ${code} - ${message}`);
+                            },
+                            onSubscription: function() {
+                                debugLog('✅ QUOTES subscription active');
+                            },
+                            onUnsubscription: function() {
+                                debugLog('⚠️ QUOTES subscription ended');
                             },
                             onItemUpdate: function(b) {
+                                updateHeartbeat(); // Mark that we received data
+                                
                                 const itemName = b.getItemName();
                                 const stockInfo = Object.values(stockWatchlist).find(s => itemName === `${s.id}@1`);
                                 const stockName = stockInfo ? stockInfo.name : itemName;
                                 
-                                console.log("[BROWSER LOG]: ");
-                                console.log(`[BROWSER LOG]: 📊 ===== QUOTES UPDATE (${stockName}) =====`);
-                                console.log(`[BROWSER LOG]: 🎯 Item: ${itemName}`);
-                                a.push.updateItems(b);
-                                console.log("[BROWSER LOG]: 📊 =============================");
-                                console.log("[BROWSER LOG]: ");
+                                debugLog("");
+                                debugLog(`📊 ===== QUOTES UPDATE (${stockName}) =====`);
+                                debugLog(`🎯 Item: ${itemName}`);
+                                
+                                // Get structured data from updateItems
+                                const updateData = a.push.updateItems(b);
+                                
+                                // Use analytics data to populate price dictionary
+                                if (updateData && updateData.fields) {
+                                    // Get the latest timestamp from time fields
+                                    const timeFields = Object.keys(updateData.fields).filter(k => 
+                                        updateData.fields[k].type === 'time'
+                                    );
+                                    
+                                    let latestTimestamp = updateData.timestamp;
+                                    if (timeFields.length > 0) {
+                                        // Use bidTime as primary timestamp, fallback to others
+                                        if (updateData.fields.bidTime && updateData.fields.bidTime.value) {
+                                            latestTimestamp = updateData.fields.bidTime.value;
+                                        } else if (updateData.fields.askTime && updateData.fields.askTime.value) {
+                                            latestTimestamp = updateData.fields.askTime.value;
+                                        } else if (updateData.fields.tradeTime && updateData.fields.tradeTime.value) {
+                                            latestTimestamp = updateData.fields.tradeTime.value;
+                                        }
+                                    }
+                                    
+                                    // Create price entry for this timestamp
+                                    if (!priceDict[latestTimestamp]) {
+                                        priceDict[latestTimestamp] = {};
+                                    }
+                                    
+                                    // Populate price fields (only bid and ask, NOT trade)
+                                    Object.keys(updateData.fields).forEach(k => {
+                                        if (updateData.fields[k].type === 'price' && (k === 'bid' || k === 'ask')) {
+                                            priceDict[latestTimestamp][k] = updateData.fields[k].value;
+                                        }
+                                    });
+                                    
+                                    // Log current price dictionary size and latest entry
+                                    debugLog(`📈 PRICE DICT: ${Object.keys(priceDict).length} entries, latest: ${latestTimestamp}`);
+                                    debugLog(`📈 LATEST PRICES: ${JSON.stringify(priceDict[latestTimestamp], null, 2)}`);
+                                }
+                                
+                                debugLog("📊 =============================");
+                                debugLog("");
                             }
                         });
                         a.push.quoteSubscription.setDataAdapter("QUOTE");
                         a.push.quoteSubscription.setRequestedSnapshot("no");
                         a.push.client.subscribe(a.push.quoteSubscription);
-                        console.log(`[BROWSER LOG]: ✅ QUOTES subscribed with ${a.push.quoteFieldList.length} fields for ${a.push.quoteItemList.length} stocks`);
+                        debugLog(`✅ QUOTES subscribed with ${a.push.quoteFieldList.length} fields for ${a.push.quoteItemList.length} stocks`);
                     }
                 };
 
                 a.push.pushtable = function() {
-                    console.log("[BROWSER LOG]: 📊 Setting up PUSHTABLE subscription...");
+                    debugLog("📊 Setting up PUSHTABLE subscription...");
                     a.push.pushtableSubscription && a.push.client.unsubscribe(a.push.pushtableSubscription);
                     a.push.pushtableItemList = [];
                     
@@ -441,27 +682,70 @@ async function main() {
                         a.push.pushtableSubscription = new Subscription("MERGE", a.push.pushtableItemList, a.push.pushtableFieldList);
                         a.push.pushtableSubscription.addListener({
                             onItemUpdate: function(b) {
+                                updateHeartbeat(); // Mark that we received data
+                                
                                 const itemName = b.getItemName();
                                 const stockInfo = Object.values(stockWatchlist).find(s => itemName === `${s.id}@1`);
                                 const stockName = stockInfo ? stockInfo.name : itemName;
                                 
-                                console.log("[BROWSER LOG]: ");
-                                console.log(`[BROWSER LOG]: 📊 ===== PUSHTABLE UPDATE (${stockName}) =====`);
-                                console.log(`[BROWSER LOG]: 🎯 Item: ${itemName}`);
-                                a.push.appendItems(b);
-                                console.log("[BROWSER LOG]: 📊 =============================");
-                                console.log("[BROWSER LOG]: ");
+                                debugLog("");
+                                debugLog(`📊 ===== PUSHTABLE UPDATE (${stockName}) =====`);
+                                debugLog(`🎯 Item: ${itemName}`);
+                                
+                                // Get structured data from appendItems
+                                const appendData = a.push.appendItems(b);
+                                
+                                // Use structured data to show trades that happened
+                                if (appendData && appendData.fields) {
+                                    // Check trades table for trade data (ONLY source for trade executions)
+                                    if (appendData.fields.table_trades && appendData.fields.table_trades.trade) {
+                                        const tradeData = appendData.fields.table_trades.trade;
+                                        const tradeSize = appendData.fields.table_trades.tradeSize;
+                                        const tradeTime = appendData.fields.table_trades.tradeTime;
+                                        
+                                        if (tradeData && tradeData.value && tradeTime && tradeTime.value) {
+                                            // Only log if we have valid trade size (not zero or unknown)
+                                            const hasValidSize = tradeSize && tradeSize.value && tradeSize.value > 0;
+                                            
+                                            if (hasValidSize) {
+                                                const decision = getBuyOrSellBefore(tradeData.value, tradeTime.value);
+                                                const priceText = tradeData.formattedValue || tradeData.value;
+                                                const sizeText = tradeSize.formattedValue || tradeSize.value;
+                                            
+                                                // Use trading event handler for clean trade logging
+                                                tradingHandler.handleTrade(priceText, sizeText, tradeTime.value, decision);
+                                            }
+                                        }
+                                    }
+                                    
+                                    // Check quotes table for bid/ask updates
+                                    if (appendData.fields.table_quotes) {
+                                        const quotesTable = appendData.fields.table_quotes;
+                                        if (quotesTable.bid || quotesTable.ask) {
+                                            const bidPrice = quotesTable.bid ? (quotesTable.bid.formattedValue || quotesTable.bid.value) : null;
+                                            const askPrice = quotesTable.ask ? (quotesTable.ask.formattedValue || quotesTable.ask.value) : null;
+                                            const quoteTime = quotesTable.bidTime ? quotesTable.bidTime.value : 
+                                                            (quotesTable.askTime ? quotesTable.askTime.value : null);
+                                            
+                                            // Use trading event handler for clean quote logging
+                                            tradingHandler.handleQuoteUpdate(bidPrice, askPrice, quoteTime);
+                                        }
+                                    }
+                                }
+                                
+                                debugLog("📊 =============================");
+                                debugLog("");
                             }
                         });
                         a.push.pushtableSubscription.setDataAdapter("QUOTE");
                         a.push.pushtableSubscription.setRequestedSnapshot("no");
                         a.push.client.subscribe(a.push.pushtableSubscription);
-                        console.log(`[BROWSER LOG]: ✅ PUSHTABLE subscribed with ${a.push.pushtableFieldList.length} fields for ${a.push.pushtableItemList.length} stocks`);
+                        debugLog(`✅ PUSHTABLE subscribed with ${a.push.pushtableFieldList.length} fields for ${a.push.pushtableItemList.length} stocks`);
                     }
                 };
 
                 a.push.realtime = function() {
-                    console.log("[BROWSER LOG]: 💹 Setting up REALTIME subscription...");
+                    debugLog("💹 Setting up REALTIME subscription...");
                     a.push.realtimeSubscription && a.push.client.unsubscribe(a.push.realtimeSubscription);
                     a.push.realtimeItemList = [];
                     
@@ -476,28 +760,83 @@ async function main() {
                         a.push.realtimeSubscription = new Subscription("MERGE", a.push.realtimeItemList, a.push.realtimeFieldList);
                         a.push.realtimeSubscription.addListener({
                             onItemUpdate: function(b) {
+                                updateHeartbeat(); // Mark that we received data
+                                
                                 const itemName = b.getItemName();
                                 const stockInfo = Object.values(stockWatchlist).find(s => itemName === `${s.id}@1`);
                                 const stockName = stockInfo ? stockInfo.name : itemName;
                                 
-                                console.log("[BROWSER LOG]: ");
-                                console.log(`[BROWSER LOG]: 💹 ===== REALTIME UPDATE (${stockName}) =====`);
-                                console.log(`[BROWSER LOG]: 🎯 Item: ${itemName}`);
-                                a.push.appendItemsRT(b);
-                                console.log("[BROWSER LOG]: 💹 =============================");
-                                console.log("[BROWSER LOG]: ");
+                                debugLog("");
+                                debugLog(`💹 ===== REALTIME UPDATE (${stockName}) =====`);
+                                debugLog(`🎯 Item: ${itemName}`);
+                                
+                                // Get structured data from appendItemsRT
+                                const realtimeData = a.push.appendItemsRT(b);
+                                
+                                // Log structured realtime data for analytics
+                                if (realtimeData && realtimeData.fields) {
+                                    debugLog(`📈 REALTIME DATA: ${JSON.stringify({
+                                        instrument: realtimeData.itemName,
+                                        timestamp: realtimeData.timestamp,
+                                        tableType: realtimeData.tableType,
+                                        priceFields: Object.keys(realtimeData.fields).filter(k => 
+                                            realtimeData.fields[k].type === 'price'
+                                        ).reduce((obj, k) => {
+                                            obj[k] = {
+                                                value: realtimeData.fields[k].value,
+                                                formatted: realtimeData.fields[k].formattedValue
+                                            };
+                                            return obj;
+                                        }, {}),
+                                        sizeFields: Object.keys(realtimeData.fields).filter(k => 
+                                            realtimeData.fields[k].type === 'size'
+                                        ).reduce((obj, k) => {
+                                            obj[k] = {
+                                                value: realtimeData.fields[k].value,
+                                                formatted: realtimeData.fields[k].formattedValue
+                                            };
+                                            return obj;
+                                        }, {}),
+                                        timeFields: Object.keys(realtimeData.fields).filter(k => 
+                                            realtimeData.fields[k].type === 'time'
+                                        ).reduce((obj, k) => {
+                                            obj[k] = realtimeData.fields[k].value;
+                                            return obj;
+                                        }, {}),
+                                        metadataFields: Object.keys(realtimeData.fields).filter(k => 
+                                            realtimeData.fields[k].type === 'metadata'
+                                        ).reduce((obj, k) => {
+                                            obj[k] = realtimeData.fields[k].value;
+                                            return obj;
+                                        }, {})
+                                    }, null, 2)}`);
+                                }
+                                
+                                debugLog("💹 =============================");
+                                debugLog("");
                             }
                         });
                         a.push.realtimeSubscription.setDataAdapter("REALTIME");
                         a.push.realtimeSubscription.setRequestedSnapshot("no");
-                        a.push.client.subscribe(a.push.realtimeSubscription);
-                        console.log(`[BROWSER LOG]: ✅ REALTIME subscribed with ${a.push.realtimeFieldList.length} fields for ${a.push.realtimeItemList.length} stocks`);
+                                        a.push.client.subscribe(a.push.realtimeSubscription);
+                        debugLog(`✅ REALTIME subscribed with ${a.push.realtimeFieldList.length} fields for ${a.push.realtimeItemList.length} stocks`);
                     }
                 };
 
                 a.push.appendItems = function(b) {
+                    var appendData = {
+                        itemName: null,
+                        fields: {},
+                        timestamp: new Date().toISOString(),
+                        tableType: "pushtable"
+                    };
+                    
                     if (null !== b) {
                         var d = b.getItemName(), f = mockSelector(`[source='lightstreamer'][table='pushtable'][item='${d}']`), g, c, k;
+                        
+                        appendData.itemName = d;
+                        appendData.fields.categoryId = parseInt(b.getValue("categoryId"));
+                        appendData.fields.currencySymbol = b.getValue("currencySymbol");
                         
                         // Mock the each function behavior - original has multiple tables with different types
                         var tables = [
@@ -514,14 +853,30 @@ async function main() {
                             var m = -1 == a.inArray(l, a.push.options.categoriesWithHiddenCurrencySymbol) ? "&nbsp;" + b.getValue("currencySymbol") : "&nbsp;&nbsp;";
                             var t = 0;
                             
+                            appendData.fields[`table_${p}`] = {};
+                            
                             b.forEachField(function(b, f, e) {
                                 f = a.push.oldValues["appendItems" + p + d + b];
                                 a.push.oldValues["appendItems" + p + d + b] = e;
-                                if (null !== e && -1 < t)
+                                
+                                if (null !== e && -1 < t) {
+                                    // Store field data in appendData object
+                                    if (!appendData.fields[`table_${p}`][b]) {
+                                        appendData.fields[`table_${p}`][b] = {
+                                            value: e,
+                                            formattedValue: null,
+                                            previousValue: f,
+                                            trend: null,
+                                            type: null,
+                                            tableType: p
+                                        };
+                                    }
+                                    
                                     switch (b) {
                                     case "trade":
                                     case "bid":
                                     case "ask":
+                                        appendData.fields[`table_${p}`][b].type = "price";
                                         if ("undefined" !== typeof f || null !== f) {
                                             var l = v(e);
                                             f > e ? (g = a.push.options.bgNegative,
@@ -533,9 +888,12 @@ async function main() {
                                             k = "eq");
                                             k = '<div class="' + k + '"></div>';
                                             var formatted = a.numberFormat(e, l, '.', ',', !1);
-                                            console.log(`[BROWSER LOG]: 📊 ${b.toUpperCase()}: ${formatted}  ${k === '<div class="pos"></div>' ? '🟢 ↗️' : k === '<div class="neg"></div>' ? '🔴 ↘️' : '🟡 ➡️'} [${d}] [${p}] ${new Date().toLocaleString('de-DE')}`);
-                                            console.log(`[BROWSER LOG]: 📊 ${b.toUpperCase()}WITHCURRENCY: ${formatted} € € ${k === '<div class="pos"></div>' ? '🟢 ↗️' : k === '<div class="neg"></div>' ? '🔴 ↘️' : '🟡 ➡️'} [${d}] [${p}] ${new Date().toLocaleString('de-DE')}`);
-                                            console.log(`[BROWSER LOG]: 📈 ${b.toUpperCase()}Trend: ${k === '<div class="pos"></div>' ? 'pos' : k === '<div class="neg"></div>' ? 'neg' : 'eq'} for ${d} [${p}]`);
+                                            appendData.fields[`table_${p}`][b].formattedValue = formatted;
+                                            appendData.fields[`table_${p}`][b].trend = k === '<div class="pos"></div>' ? 'pos' : k === '<div class="neg"></div>' ? 'neg' : 'eq';
+                                            
+                                            debugLog(`📊 ${b.toUpperCase()}: ${formatted}  ${k === '<div class="pos"></div>' ? '🟢 ↗️' : k === '<div class="neg"></div>' ? '🔴 ↘️' : '🟡 ➡️'} [${d}] [${p}] ${new Date().toLocaleString('de-DE')}`);
+                                            debugLog(`📊 ${b.toUpperCase()}WITHCURRENCY: ${formatted} € € ${k === '<div class="pos"></div>' ? '🟢 ↗️' : k === '<div class="neg"></div>' ? '🔴 ↘️' : '🟡 ➡️'} [${d}] [${p}] ${new Date().toLocaleString('de-DE')}`);
+                                            debugLog(`📈 ${b.toUpperCase()}Trend: ${k === '<div class="pos"></div>' ? 'pos' : k === '<div class="neg"></div>' ? 'neg' : 'eq'} for ${d} [${p}]`);
                                             
                                             n(mockSelector(`[field='${b}']`), formatted, "background", c, g);
                                             n(mockSelector(`[field='${b}WithCurrencySymbol']`), formatted + m, "background", c, g);
@@ -546,39 +904,57 @@ async function main() {
                                     case "askSize":
                                     case "tradeSize":
                                     case "tradeCumulativeSize":
+                                        appendData.fields[`table_${p}`][b].type = "size";
                                         if (null !== e) {
                                             var formatted = 0 == e ? "-" : a.numberFormat(e, 0, '.', ',', !1);
-                                            console.log(`[BROWSER LOG]: 📊 ${b.toUpperCase()}: ${formatted} shares   [${d}] [${p}] ${new Date().toLocaleString('de-DE')}`);
+                                            appendData.fields[`table_${p}`][b].formattedValue = formatted;
+                                            debugLog(`📊 ${b.toUpperCase()}: ${formatted} shares   [${d}] [${p}] ${new Date().toLocaleString('de-DE')}`);
                                             n(mockSelector(`[field='${b}']`), formatted, void 0, c, g);
                                         }
                                         break;
                                     case "tradeTime":
                                     case "bidTime":
                                     case "askTime":
+                                        appendData.fields[`table_${p}`][b].type = "time";
                                         "tradeTime" == b && "trades" == p && f == e ? t = -1E3 : "bidTime" == b && "quotes" == p && f == e ? t = -1E3 : null !== e && f != e && (
-                                            console.log(`[BROWSER LOG]: 📊 ${b.toUpperCase()}: ${e}   [${d}] [${p}] ${new Date().toLocaleString('de-DE')}`),
+                                            appendData.fields[`table_${p}`][b].formattedValue = e,
+                                            debugLog(`📊 ${b.toUpperCase()}: ${e}   [${d}] [${p}] ${new Date().toLocaleString('de-DE')}`),
                                             t += n(mockSelector(`[field='${b}']`), e, void 0, c, g)
                                         );
                                     }
+                                }
                             });
                             
                             if (0 < t) {
-                                console.log(`[BROWSER LOG]: 📊 Table ${p}: ${t} fields updated for ${d}`);
+                                debugLog(`📊 Table ${p}: ${t} fields updated for ${d}`);
                             }
                         });
                     }
+                    
+                    return appendData;
                 };
 
                 a.push.appendItemsRT = function(b) {
+                    var realtimeData = {
+                        itemName: null,
+                        fields: {},
+                        timestamp: new Date().toISOString(),
+                        tableType: "realtime"
+                    };
+                    
                     if (null !== b) {
                         var d = b.getItemName();
                         var f = mockSelector(`[source='lightstreamer'][table='realtime'][item*='${d}']`);
                         var g = ["5"]; // mock categoryids
                         
+                        realtimeData.itemName = d;
+                        realtimeData.fields.categoryId = parseInt(b.getValue("categoryId"));
+                        realtimeData.fields.currencySymbol = b.getValue("currencySymbol");
+                        
                         if (0 < g.length && "" != g[0]) {
                             var c = parseInt(b.getValue("categoryId"));
                             if (0 > g.indexOf(c.toString()))
-                                return
+                                return realtimeData;
                         }
                         
                         var k = mockSelector("tr[rel='template']");
@@ -587,53 +963,94 @@ async function main() {
                         
                         b.forEachField(function(c, g, h) {
                             a.push.oldValues["appendItems" + d + c] = h;
-                            if (null !== h)
+                            
+                            if (null !== h) {
+                                // Store field data in realtimeData object
+                                realtimeData.fields[c] = {
+                                    value: h,
+                                    formattedValue: null,
+                                    type: null,
+                                    tableType: "realtime"
+                                };
+                                
                                 switch (c) {
                                 case "instrumentId":
-                                    console.log(`[BROWSER LOG]: 💹 INSTRUMENTID: ${h} [${d}] ${new Date().toLocaleString('de-DE')}`);
+                                    realtimeData.fields[c].type = "metadata";
+                                    realtimeData.fields[c].formattedValue = h;
+                                    debugLog(`💹 INSTRUMENTID: ${h} [${d}] ${new Date().toLocaleString('de-DE')}`);
                                     break;
                                 case "instName":
                                 case "displayName":
+                                    realtimeData.fields[c].type = "metadata";
                                     h || (h = b.getValue("isin"));
+                                    realtimeData.fields[c].value = h;
+                                    realtimeData.fields[c].formattedValue = h;
                                     var link = '<a href="">' + h + "</a>";
-                                    console.log(`[BROWSER LOG]: 💹 DISPLAYNAME: ${h} [${d}] ${new Date().toLocaleString('de-DE')}`);
+                                    debugLog(`💹 DISPLAYNAME: ${h} [${d}] ${new Date().toLocaleString('de-DE')}`);
                                     n(mockSelector("[field='linkedDisplayName']"), link, void 0, void 0, void 0);
                                     break;
                                 case "trade":
+                                    realtimeData.fields[c].type = "price";
                                     var formatted = a.numberFormat(h, 4, '.', ',', !1);
-                                    console.log(`[BROWSER LOG]: 💹 TRADE: ${formatted} [${d}] ${new Date().toLocaleString('de-DE')}`);
-                                    console.log(`[BROWSER LOG]: 💹 TRADEWITHCURRENCY: ${formatted}${r} [${d}] ${new Date().toLocaleString('de-DE')}`);
+                                    realtimeData.fields[c].formattedValue = formatted;
+                                    debugLog(`💹 TRADE: ${formatted} [${d}] ${new Date().toLocaleString('de-DE')}`);
+                                    debugLog(`💹 TRADEWITHCURRENCY: ${formatted}${r} [${d}] ${new Date().toLocaleString('de-DE')}`);
                                     n(mockSelector(`[field='${c}']`), formatted, "background", void 0, void 0);
                                     n(mockSelector(`[field='${c}WithCurrencySymbol']`), formatted + r, "background", void 0, void 0);
                                     break;
                                 case "tradeSize":
+                                    realtimeData.fields[c].type = "size";
                                     if (null !== h) {
                                         var formatted = 0 == h ? "-" : a.numberFormat(h, 0, '.', ',', !1);
-                                        console.log(`[BROWSER LOG]: 💹 TRADESIZE: ${formatted} shares [${d}] ${new Date().toLocaleString('de-DE')}`);
+                                        realtimeData.fields[c].formattedValue = formatted;
+                                        debugLog(`💹 TRADESIZE: ${formatted} shares [${d}] ${new Date().toLocaleString('de-DE')}`);
                                         n(mockSelector(`[field='${c}']`), formatted, void 0, void 0, void 0);
                                     }
                                     break;
                                 case "tradeTime":
-                                    console.log(`[BROWSER LOG]: 💹 TRADETIME: ${h} [${d}] ${new Date().toLocaleString('de-DE')}`);
+                                    realtimeData.fields[c].type = "time";
+                                    realtimeData.fields[c].formattedValue = h;
+                                    debugLog(`💹 TRADETIME: ${h} [${d}] ${new Date().toLocaleString('de-DE')}`);
                                     n(mockSelector(`[field='${c}']`), h, void 0, void 0, void 0);
                                     break;
                                 case "isin":
-                                    console.log(`[BROWSER LOG]: 💹 ISIN: ${h} [${d}] ${new Date().toLocaleString('de-DE')}`);
+                                    realtimeData.fields[c].type = "metadata";
+                                    realtimeData.fields[c].formattedValue = h;
+                                    debugLog(`💹 ISIN: ${h} [${d}] ${new Date().toLocaleString('de-DE')}`);
                                     break;
                                 case "currencySymbol":
-                                    console.log(`[BROWSER LOG]: 💹 CURRENCYSYMBOL: ${h} [${d}] ${new Date().toLocaleString('de-DE')}`);
+                                    realtimeData.fields[c].type = "metadata";
+                                    realtimeData.fields[c].formattedValue = h;
+                                    debugLog(`💹 CURRENCYSYMBOL: ${h} [${d}] ${new Date().toLocaleString('de-DE')}`);
                                     break;
                                 case "categoryId":
-                                    console.log(`[BROWSER LOG]: 💹 CATEGORYID: ${h} [${d}] ${new Date().toLocaleString('de-DE')}`);
+                                    realtimeData.fields[c].type = "metadata";
+                                    realtimeData.fields[c].formattedValue = h;
+                                    debugLog(`💹 CATEGORYID: ${h} [${d}] ${new Date().toLocaleString('de-DE')}`);
                                     break;
                                 }
+                            }
                         });
                     }
+                    
+                    return realtimeData;
                 };
 
                 a.push.updateItems = function(b) {
+                    var updateData = {
+                        itemName: null,
+                        fields: {},
+                        timestamp: new Date().toISOString()
+                    };
+                    
                     if (null !== b) {
                         var d = b.getItemName(), f, g, c, k = parseInt(b.getValue("categoryId")), r = -1 == a.inArray(k, a.push.options.categoriesWithHiddenCurrencySymbol) ? "&nbsp;" + b.getValue("currencySymbol") : "&nbsp;&nbsp;&nbsp;", q = b.getValue("currencyISO"), p = 4;
+                        
+                        updateData.itemName = d;
+                        updateData.fields.categoryId = k;
+                        updateData.fields.currencySymbol = b.getValue("currencySymbol");
+                        updateData.fields.currencyISO = q;
+                        
                         b.forEachChangedField(function(b, e, l) {
                             p = 4;
                             if (null !== l) {
@@ -644,11 +1061,22 @@ async function main() {
                                 p = v(l);
                                 m = a.push.oldValues["updateItems" + d + b];
                                 a.push.oldValues["updateItems" + d + b] = l;
+                                
+                                // Store field data in updateData object
+                                updateData.fields[b] = {
+                                    value: l,
+                                    formattedValue: null,
+                                    previousValue: m,
+                                    trend: null,
+                                    type: null
+                                };
+                                
                                 switch (b) {
                                 case "trade":
                                 case "bid":
                                 case "ask":
                                 case "mid":
+                                    updateData.fields[b].type = "price";
                                     if (("undefined" !== typeof m || null !== m) && m !== l) {
                                         if (m > l) {
                                             f = a.push.options.bgNegative;
@@ -660,10 +1088,14 @@ async function main() {
                                             h = "pos") : (f = a.push.options.bgNeutral,
                                             g = a.push.options.colorNeutral,
                                             h = "eq");
+                                        
+                                        updateData.fields[b].trend = h;
                                         var formatted = a.numberFormat(l, p, '.', ',', !1);
-                                        console.log(`[BROWSER LOG]: 📊 ${b.toUpperCase()}: ${formatted}  ${h === 'pos' ? '🟢 ↗️' : h === 'neg' ? '🔴 ↘️' : '🟡 ➡️'} [${d}] ${new Date().toLocaleString('de-DE')}`);
-                                        console.log(`[BROWSER LOG]: 📊 ${b.toUpperCase()}WITHCURRENCY: ${formatted}${r} ${h === 'pos' ? '🟢 ↗️' : h === 'neg' ? '🔴 ↘️' : '🟡 ➡️'} [${d}] ${new Date().toLocaleString('de-DE')}`);
-                                        console.log(`[BROWSER LOG]: 📈 ${b.toUpperCase()}Trend: ${h} for ${d}`);
+                                        updateData.fields[b].formattedValue = formatted;
+                                        
+                                        debugLog(`📊 ${b.toUpperCase()}: ${formatted}  ${h === 'pos' ? '🟢 ↗️' : h === 'neg' ? '🔴 ↘️' : '🟡 ➡️'} [${d}] ${new Date().toLocaleString('de-DE')}`);
+                                        debugLog(`📊 ${b.toUpperCase()}WITHCURRENCY: ${formatted}${r} ${h === 'pos' ? '🟢 ↗️' : h === 'neg' ? '🔴 ↘️' : '🟡 ➡️'} [${d}] ${new Date().toLocaleString('de-DE')}`);
+                                        debugLog(`📈 ${b.toUpperCase()}Trend: ${h} for ${d}`);
                                         
                                         var k = "background";
                                         n(e, formatted, k, g, f, h);
@@ -677,18 +1109,22 @@ async function main() {
                                     }
                                     break;
                                 case "tradeCumulativeTurnover":
+                                    updateData.fields[b].type = "turnover";
                                     p = 0;
                                     var formatted = a.numberFormat(l, p, '.', ',', !1);
-                                    console.log(`[BROWSER LOG]: 📊 ${b.toUpperCase()}: ${formatted} [${d}] ${new Date().toLocaleString('de-DE')}`);
+                                    updateData.fields[b].formattedValue = formatted;
+                                    debugLog(`📊 ${b.toUpperCase()}: ${formatted} [${d}] ${new Date().toLocaleString('de-DE')}`);
                                     n(e, formatted, k, g, f);
                                     break;
                                 case "bidSize":
                                 case "askSize":
                                 case "tradeSize":
                                 case "tradeCumulativeSize":
+                                    updateData.fields[b].type = "size";
                                     if (null !== l) {
                                         var formatted = 0 == l ? "-" : a.numberFormat(l, 0, '.', ',', !1);
-                                        console.log(`[BROWSER LOG]: 📊 ${b.toUpperCase()}: ${formatted} shares [${d}] ${new Date().toLocaleString('de-DE')}`);
+                                        updateData.fields[b].formattedValue = formatted;
+                                        debugLog(`📊 ${b.toUpperCase()}: ${formatted} shares [${d}] ${new Date().toLocaleString('de-DE')}`);
                                         n(e, formatted, k, g, f);
                                     }
                                     break;
@@ -696,8 +1132,10 @@ async function main() {
                                 case "bidTime":
                                 case "askTime":
                                 case "midTime":
+                                    updateData.fields[b].type = "time";
                                     if (null !== l) {
-                                        console.log(`[BROWSER LOG]: 📊 ${b.toUpperCase()}: ${l} [${d}] ${new Date().toLocaleString('de-DE')}`);
+                                        updateData.fields[b].formattedValue = l;
+                                        debugLog(`📊 ${b.toUpperCase()}: ${l} [${d}] ${new Date().toLocaleString('de-DE')}`);
                                         n(e, l, k, g, f);
                                     }
                                     break;
@@ -705,9 +1143,12 @@ async function main() {
                                 case "bidPerf1dRel":
                                 case "askPerf1dRel":
                                 case "midPerf1dRel":
+                                    updateData.fields[b].type = "performance_relative";
                                     f = 0 > l ? a.push.options.bgNegative : 0 < l ? a.push.options.bgPositive : !1;
                                     var formatted = isFinite(l) && null != l ? a.numberFormat(l, 2, '.', ',', 0 != l) : "-";
-                                    console.log(`[BROWSER LOG]: 📊 ${b.toUpperCase()}: ${formatted}% [${d}] ${new Date().toLocaleString('de-DE')}`);
+                                    updateData.fields[b].formattedValue = formatted;
+                                    updateData.fields[b].trend = 0 > l ? 'neg' : 0 < l ? 'pos' : 'eq';
+                                    debugLog(`📊 ${b.toUpperCase()}: ${formatted}% [${d}] ${new Date().toLocaleString('de-DE')}`);
                                     k = "color";
                                     n(e, formatted, k, g, f);
                                     break;
@@ -715,48 +1156,57 @@ async function main() {
                                 case "midPerf1d":
                                 case "bidPerf1d":
                                 case "askPerf1d":
+                                    updateData.fields[b].type = "performance_absolute";
                                     f = 0 > l ? a.push.options.bgNegative : 0 < l ? a.push.options.bgPositive : !1;
                                     var formatted = isFinite(l) && null !== l ? a.numberFormat(l, p, '.', ',', 0 != l) : "-";
-                                    console.log(`[BROWSER LOG]: 📊 ${b.toUpperCase()}: ${formatted} [${d}] ${new Date().toLocaleString('de-DE')}`);
+                                    updateData.fields[b].formattedValue = formatted;
+                                    updateData.fields[b].trend = 0 > l ? 'neg' : 0 < l ? 'pos' : 'eq';
+                                    debugLog(`📊 ${b.toUpperCase()}: ${formatted} [${d}] ${new Date().toLocaleString('de-DE')}`);
                                     k = "color";
                                     n(e, formatted, k, g, f);
                                     break;
                                 case "instrumentId":
-                                    console.log(`[BROWSER LOG]: 📊 ${b.toUpperCase()}: ${l}   [${d}] ${new Date().toLocaleString('de-DE')}`);
-                                    break;
                                 case "isin":
-                                    console.log(`[BROWSER LOG]: 📊 ${b.toUpperCase()}: ${l}   [${d}] ${new Date().toLocaleString('de-DE')}`);
-                                    break;
                                 case "displayName":
-                                    console.log(`[BROWSER LOG]: 📊 ${b.toUpperCase()}: ${l}   [${d}] ${new Date().toLocaleString('de-DE')}`);
-                                    break;
                                 case "currencySymbol":
-                                    console.log(`[BROWSER LOG]: 📊 ${b.toUpperCase()}: ${l}   [${d}] ${new Date().toLocaleString('de-DE')}`);
-                                    break;
                                 case "categoryId":
-                                    console.log(`[BROWSER LOG]: 📊 ${b.toUpperCase()}: ${l}   [${d}] ${new Date().toLocaleString('de-DE')}`);
+                                    updateData.fields[b].type = "metadata";
+                                    updateData.fields[b].formattedValue = l;
+                                    debugLog(`📊 ${b.toUpperCase()}: ${l}   [${d}] ${new Date().toLocaleString('de-DE')}`);
                                     break;
                                 }
                             }
-                        })
+                        });
                     }
+                    
+                    return updateData;
                 };
                 
                 return a.push;
             })(mockJQuery);
             
             // Start the subscriptions using the original lightstreamer-push logic
+            debugLog('📊 Starting QUOTES subscription...');
             lightstreamerPush.quotes();
+            debugLog('📊 QUOTES subscription started, starting PUSHTABLE...');
             lightstreamerPush.pushtable(); 
+            debugLog('📊 PUSHTABLE subscription started, starting REALTIME...');
             lightstreamerPush.realtime();
+            debugLog('📊 All subscriptions started successfully!');
+            
+            // Start heartbeat monitoring now that everything is set up
+            startHeartbeat();
+            debugLog('📊 Heartbeat monitoring started!');
         }
         
-        console.log('[BROWSER LOG]: 🚀 Connecting client...');
-        if (client.getStatus && client.getStatus() === 'DISCONNECTED') {
-            if (client.connect) client.connect();
+        debugLog('🚀 Connecting client...');
+        if (client.connect) {
+            client.connect();
         }
+        
+        // Start connection monitoring immediately
         waitForConnection();
-    }, STOCK_WATCHLIST);
+    }, STOCK_WATCHLIST, tradingEventHandlerCode, DEBUG_MODE);
 
     console.log('✅ Multi-Stock Lightstreamer Logger setup complete!');
     console.log('📊 Using exact lightstreamer-push.js patterns:');
