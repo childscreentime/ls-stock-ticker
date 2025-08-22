@@ -96,16 +96,20 @@
         }
     }
     
-    // Price tracking and trade direction analysis (from original app)
-    priceDict = {}; // { timestamp: { bid: value, ask: value } }
-    let lastKnownBidAsk = { bid: null, ask: null };
+    // Price tracking and trade direction analysis (per instrument)
+    const instrumentPriceDict = {}; // { instrumentItem: { timestamp: { bid: value, ask: value } } }
+    const instrumentLastKnownBidAsk = {}; // { instrumentItem: { bid: value, ask: value } }
     tradingHandler = new TradingEventHandler();
     
-    function getBuyOrSellBefore(price, timestamp) {
+    function getBuyOrSellBefore(price, timestamp, instrumentItem) {
+        // Get price history for this specific instrument
+        const priceDict = instrumentPriceDict[instrumentItem] || {};
+        const lastKnownBidAsk = instrumentLastKnownBidAsk[instrumentItem] || { bid: null, ask: null };
+        
         const sortedTimestamps = Object.keys(priceDict).sort().reverse();
         
-        console.log(`🔍 ANALYZING: Trade ${price} at ${timestamp}`);
-        console.log(`🔍 SEARCHING: ${sortedTimestamps.length} price records + last known bid/ask`);
+        console.log(`🔍 ANALYZING: Trade ${price} at ${timestamp} for instrument ${instrumentItem}`);
+        console.log(`🔍 SEARCHING: ${sortedTimestamps.length} price records + last known bid/ask for ${instrumentItem}`);
         
         for (const ts of sortedTimestamps) {
             if (ts < timestamp) {
@@ -113,19 +117,19 @@
                 
                 if (priceData.ask && Math.abs(priceData.ask - price) < 0.0001) {
                     console.log(`🔍 MATCH: Trade ${price} matched ASK ${priceData.ask} at ${ts} → BUY`);
-                    cleanPriceHistory(ts);
+                    cleanPriceHistory(ts, instrumentItem);
                     return "BUY";
                 }
                 
                 if (priceData.bid && Math.abs(priceData.bid - price) < 0.0001) {
                     console.log(`🔍 MATCH: Trade ${price} matched BID ${priceData.bid} at ${ts} → SELL`);
-                    cleanPriceHistory(ts);
+                    cleanPriceHistory(ts, instrumentItem);
                     return "SELL";
                 }
             }
         }
         
-        // Check against last known bid/ask
+        // Check against last known bid/ask for this instrument
         if (lastKnownBidAsk.ask && Math.abs(lastKnownBidAsk.ask - price) < 0.0001) {
             console.log(`🔍 MATCH: Trade ${price} matched LAST KNOWN ASK ${lastKnownBidAsk.ask} → BUY`);
             return "BUY";
@@ -136,25 +140,31 @@
             return "SELL";
         }
         
-        console.log(`🔍 NO MATCH: Trade ${price} at ${timestamp} - no matching bid/ask found`);
+        console.log(`🔍 NO MATCH: Trade ${price} at ${timestamp} - no matching bid/ask found for ${instrumentItem}`);
         return "N/A";
     }
     
-    function cleanPriceHistory(afterTimestamp) {
+    function cleanPriceHistory(afterTimestamp, instrumentItem) {
+        const priceDict = instrumentPriceDict[instrumentItem] || {};
         const timestamps = Object.keys(priceDict);
         let removedCount = 0;
         
+        // Ensure lastKnownBidAsk exists for this instrument
+        if (!instrumentLastKnownBidAsk[instrumentItem]) {
+            instrumentLastKnownBidAsk[instrumentItem] = { bid: null, ask: null };
+        }
+        
         for (const ts of timestamps) {
             if (ts <= afterTimestamp) {
-                if (priceDict[ts].bid) lastKnownBidAsk.bid = priceDict[ts].bid;
-                if (priceDict[ts].ask) lastKnownBidAsk.ask = priceDict[ts].ask;
+                if (priceDict[ts].bid) instrumentLastKnownBidAsk[instrumentItem].bid = priceDict[ts].bid;
+                if (priceDict[ts].ask) instrumentLastKnownBidAsk[instrumentItem].ask = priceDict[ts].ask;
                 delete priceDict[ts];
                 removedCount++;
             }
         }
         
         if (removedCount > 0) {
-            console.log(`🧹 CLEANED: Removed ${removedCount} old price records after ${afterTimestamp}`);
+            console.log(`🧹 CLEANED: Removed ${removedCount} old price records for ${instrumentItem} after ${afterTimestamp}`);
         }
     }
     
@@ -217,42 +227,47 @@
     }
     
     function setupSubscriptions(client) {
-        // Get instrument info from page (extract WKN/ID from URL or page content)
-        const instrumentInfo = extractInstrumentInfo();
-        if (!instrumentInfo || !instrumentInfo.instruments || instrumentInfo.instruments.length === 0) {
-            console.log('⚠️ Could not extract instrument info from page');
-            return;
-        }
-        
-        console.log('📋 Instrument data:', instrumentInfo);
-        
-        // Wait for client to be connected
-        const checkConnection = () => {
-            const status = client.getStatus();
-            console.log('📊 Client status:', status);
+        // Get instrument info from page - will throw exception if not found
+        try {
+            const instrumentInfo = extractInstrumentInfo();
+            console.log('📋 Instrument data:', instrumentInfo);
             
-            if (status.includes('CONNECTED') && (status.includes('STREAMING') || status.includes('POLLING'))) {
-                console.log('🎉 Connected! Setting up our subscriptions...');
-                createOurSubscriptions(client, instrumentInfo);
-            } else if (status === 'DISCONNECTED') {
-                console.log('🔄 Client disconnected, will retry...');
-                setTimeout(checkConnection, 2000);
-            } else {
-                console.log('⏳ Waiting for connection...');
-                setTimeout(checkConnection, 1000);
-            }
-        };
-        
-        checkConnection();
+            // Wait for client to be connected
+            const checkConnection = () => {
+                const status = client.getStatus();
+                console.log('📊 Client status:', status);
+                
+                if (status.includes('CONNECTED') && (status.includes('STREAMING') || status.includes('POLLING'))) {
+                    console.log('🎉 Connected! Setting up our subscriptions...');
+                    initializeLightstreamerSubscriptions(client, instrumentInfo);
+                } else if (status === 'DISCONNECTED') {
+                    console.log('🔄 Client disconnected, will retry...');
+                    setTimeout(checkConnection, 2000);
+                } else {
+                    console.log('⏳ Waiting for connection...');
+                    setTimeout(checkConnection, 1000);
+                }
+            };
+            
+            checkConnection();
+        } catch (error) {
+            console.error('❌ FATAL: Could not extract instrument information:', error.message);
+            console.error('💡 SOLUTION: Please configure instruments in the extension options page and ensure you are on a supported ls-tc.de page');
+            throw error; // Re-throw to stop initialization
+        }
     }
     
     function extractInstrumentInfo() {
-        // First try to get watchlist info from the DOM element created by content script
+        // Try to get watchlist info from the DOM element created by content script
         const dataElement = document.getElementById('ls-watchlist-data');
         if (dataElement) {
             try {
                 const watchlistData = JSON.parse(dataElement.getAttribute('data-watchlist'));
                 console.log('📋 Using watchlist info from content script:', watchlistData);
+                
+                if (!watchlistData || Object.keys(watchlistData).length === 0) {
+                    throw new Error('Watchlist data is empty - no instruments configured');
+                }
                 
                 // Convert watchlist to array of instrument info for subscriptions
                 const instruments = Object.entries(watchlistData).map(([wkn, instrument]) => ({
@@ -268,75 +283,16 @@
                 
                 return { instruments, isWatchlist: true };
             } catch (e) {
-                console.log('⚠️ Failed to parse watchlist data from DOM element:', e);
+                throw new Error(`Failed to parse watchlist data from DOM element: ${e.message}`);
             }
         }
 
-        // Fallback: Legacy single instrument data
-        const legacyDataElement = document.getElementById('ls-instrument-data');
-        if (legacyDataElement) {
-            try {
-                const instrumentData = JSON.parse(legacyDataElement.getAttribute('data-instrument'));
-                console.log('📋 Using legacy single instrument info from content script:', instrumentData);
-                return {
-                    instruments: [{
-                        id: instrumentData.id || '43763',
-                        item: instrumentData.id ? `${instrumentData.id}@1` : '43763@1',
-                        name: instrumentData.name || document.title,
-                        wkn: instrumentData.wkn
-                    }],
-                    isWatchlist: false
-                };
-            } catch (e) {
-                console.log('⚠️ Failed to parse legacy instrument data from DOM element:', e);
-            }
-        }
-        
-        // Fallback: Extract from URL: /de/aktie/43763 -> ID: 43763
-        const pathMatch = window.location.pathname.match(/\/aktie\/(\d+)/);
-        if (pathMatch) {
-            const instrumentId = pathMatch[1];
-            return {
-                instruments: [{
-                    id: instrumentId,
-                    item: `${instrumentId}@1`,
-                    name: document.title
-                }],
-                isWatchlist: false
-            };
-        }
-        
-        // Another fallback: look for data attributes or script tags
-        const dataElements = document.querySelectorAll('[data-instrument-id], [data-id]');
-        for (const elem of dataElements) {
-            const id = elem.getAttribute('data-instrument-id') || elem.getAttribute('data-id');
-            if (id && /^\d+$/.test(id)) {
-                return {
-                    instruments: [{
-                        id: id,
-                        item: `${id}@1`,
-                        name: document.title
-                    }],
-                    isWatchlist: false
-                };
-            }
-        }
-        
-        // Last resort: use NVIDIA default for testing
-        console.log('⚠️ Could not extract instrument info, using NVIDIA default');
-        return {
-            instruments: [{
-                id: '43763',
-                item: '43763@1',
-                name: 'NVIDIA CORP. DL-,001',
-                wkn: '918422'
-            }],
-            isWatchlist: false
-        };
+        // If no watchlist data element found, throw an exception
+        throw new Error('No instrument data found - content script must provide ls-watchlist-data element. Please ensure the extension is properly configured with instruments.');
     }
     
-    function createOurSubscriptions(client, instrumentInfo) {
-        console.log('📊 Creating subscriptions matching original index.js logic...');
+    function initializeLightstreamerSubscriptions(client, instrumentInfo) {
+        console.log('📊 Initializing Lightstreamer subscriptions for multi-instrument monitoring...');
         
         // Create item list from all instruments
         const itemList = instrumentInfo.instruments.map(inst => inst.item);
@@ -373,18 +329,23 @@
                 // Get latest timestamp (prioritize bidTime like original)
                 let latestTimestamp = bidTime || askTime || tradeTime || new Date().toISOString();
                 
-                // Update price dictionary exactly like original
+                // Update price dictionary per instrument
                 if (bid || ask) {
-                    if (!priceDict[latestTimestamp]) {
-                        priceDict[latestTimestamp] = {};
+                    // Initialize price dict for this instrument if needed
+                    if (!instrumentPriceDict[itemName]) {
+                        instrumentPriceDict[itemName] = {};
+                    }
+                    
+                    if (!instrumentPriceDict[itemName][latestTimestamp]) {
+                        instrumentPriceDict[itemName][latestTimestamp] = {};
                     }
                     
                     // Only populate bid and ask (NOT trade) like original
-                    if (bid) priceDict[latestTimestamp].bid = parseFloat(bid);
-                    if (ask) priceDict[latestTimestamp].ask = parseFloat(ask);
+                    if (bid) instrumentPriceDict[itemName][latestTimestamp].bid = parseFloat(bid);
+                    if (ask) instrumentPriceDict[itemName][latestTimestamp].ask = parseFloat(ask);
                     
-                    console.log(`📈 PRICE DICT: ${Object.keys(priceDict).length} entries, latest: ${latestTimestamp}`);
-                    console.log(`📈 LATEST PRICES: ${JSON.stringify(priceDict[latestTimestamp], null, 2)}`);
+                    console.log(`📈 PRICE DICT for ${instrumentName}: ${Object.keys(instrumentPriceDict[itemName]).length} entries, latest: ${latestTimestamp}`);
+                    console.log(`📈 LATEST PRICES for ${instrumentName}: ${JSON.stringify(instrumentPriceDict[itemName][latestTimestamp], null, 2)}`);
                     
                     // Call quote handler with instrument info
                     tradingHandler.handleQuoteUpdate(bid, ask, latestTimestamp, instrument);
@@ -396,7 +357,7 @@
         quoteSubscription.setRequestedSnapshot("no");
         client.subscribe(quoteSubscription);
         
-        // PUSHTABLE subscription (for trade executions)
+        // PUSHTABLE subscription (for trade executions only - quotes handled by QUOTE subscription)
         const pushtableSubscription = new Subscription("MERGE", itemList, pushtableFieldList);
         
         pushtableSubscription.addListener({
@@ -453,37 +414,19 @@
                     
                     // Only process if we have valid trade data (like original validation)
                     if (trade && tradeTime && tradeSize && parseFloat(tradeSize) > 0) {
-                        const decision = getBuyOrSellBefore(parseFloat(trade), tradeTime);
+                        const decision = getBuyOrSellBefore(parseFloat(trade), tradeTime, itemName);
                         
-                        console.log(`🔥 TRADE EXECUTION: ${trade} × ${tradeSize} at ${tradeTime} (${decision})`);
+                        console.log(`🔥 TRADE EXECUTION for ${instrumentName}: ${trade} × ${tradeSize} at ${tradeTime} (${decision})`);
                         
                         // Use exact same handler call as original with instrument info
                         tradingHandler.handleTrade(trade, tradeSize, tradeTime, decision, instrument);
                     } else {
-                        console.log(`⚠️ INCOMPLETE TRADE DATA: trade=${trade}, tradeTime=${tradeTime}, tradeSize=${tradeSize}`);
+                        console.log(`⚠️ INCOMPLETE TRADE DATA for ${instrumentName}: trade=${trade}, tradeTime=${tradeTime}, tradeSize=${tradeSize}`);
                     }
                 } else if (currentTradeTime) {
                     console.log('⏭️ TRADETIME UNCHANGED - Skipping duplicate trade data');
                 } else {
                     console.log('⚠️ NO TRADETIME - Not a trade execution update');
-                }
-                
-                // Always process bid/ask updates (these use "quotes" table logic in original)
-                const bid = update.getValue("bid");
-                const ask = update.getValue("ask");
-                const bidTime = update.getValue("bidTime");
-                const askTime = update.getValue("askTime");
-                
-                if (bid || ask) {
-                    const timestamp = bidTime || askTime || currentTradeTime || new Date().toISOString();
-                    if (!priceDict[timestamp]) {
-                        priceDict[timestamp] = {};
-                    }
-                    if (bid) priceDict[timestamp].bid = parseFloat(bid);
-                    if (ask) priceDict[timestamp].ask = parseFloat(ask);
-                    
-                    // Call quote handler with instrument info
-                    tradingHandler.handleQuoteUpdate(bid, ask, timestamp, instrument);
                 }
             }
         });
@@ -492,7 +435,7 @@
         pushtableSubscription.setRequestedSnapshot("no");
         client.subscribe(pushtableSubscription);
         
-        console.log('🎯 Subscriptions created with exact original logic!');
+        console.log('✅ Lightstreamer subscriptions initialized successfully!');
     }
     
     // Start initialization
