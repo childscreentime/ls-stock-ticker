@@ -1,198 +1,148 @@
-# Lightstreamer Multi-Stock Ticker Logger
+# LS Stock Ticker Chrome Extension
 
-A real-time multi-stock data logger that replicates the exact behavior of the original `lightstreamer-push.js` from ls-tc.de, but instead of manipulating DOM elements, it logs all HTML changes to the console for analysis and monitoring of multiple stocks simultaneously.
+A Chrome extension that monitors multiple stock instruments on Lang & Schwarz (ls-tc.de) in real-time, providing trade alerts and price notifications directly in your browser.
 
-## 🏗️ Architecture & Design
+## 🚀 Features
 
-### Core Components
+- **Multi-Instrument Monitoring**: Track multiple stocks simultaneously (NVIDIA, Rheinmetall, etc.)
+- **Real-Time Alerts**: Get instant notifications for large trades and price movements
+- **Smart Tab Management**: Only injects into one ls-tc.de tab to prevent conflicts
+- **ISIN-Based Configuration**: Easy instrument setup using ISIN codes
+- **Live Price Tracking**: Real-time bid/ask updates with spread calculations
+- **Trade Detection**: Automatic buy/sell detection with volume analysis
 
-1. **`index.js`** - Main application file using Puppeteer to run in browser context
-2. **`lib.js`** - Standalone library version of the modified lightstreamer-push logic
+## 📦 Installation
 
-### Stock Watchlist Configuration
+### Method 1: Load as Unpacked Extension
 
-The system supports monitoring multiple stocks through a simple configuration:
+1. Clone this repository:
+   ```bash
+   git clone https://github.com/childscreentime/ls-stock-ticker.git
+   ```
 
-```javascript
-const STOCK_WATCHLIST = {
-    '554550': { id: '43763', name: 'NVIDIA CORP.' },        // NVIDIA
-    '865985': { id: 'XXXXX', name: 'APPLE INC.' },          // Apple  
-    '906866': { id: 'XXXXX', name: 'TESLA INC.' },          // Tesla
-    '870450': { id: 'XXXXX', name: 'ALPHABET INC.' },       // Google
-};
-```
+2. Open Chrome and navigate to `chrome://extensions/`
 
-**WKN Mapping**: Each stock is identified by its WKN (Wertpapierkennnummer) which maps to the internal ls-tc.de instrument ID.
+3. Enable "Developer mode" (toggle in top right)
 
-### Design Philosophy
+4. Click "Load unpacked" and select the `chrome-extension` folder
 
-The project follows a **reverse-engineering approach**:
-- ✅ Preserves exact original logic from `lightstreamer-push.js`
-- ✅ Maintains all three subscription types (QUOTES, PUSHTABLE, REALTIME)
-- ✅ Replicates field filtering and change detection algorithms
-- ✅ Handles multiple table types ("trades" and "quotes") correctly
-- ✅ Supports multiple stocks in a single session
-- ✅ Replaces DOM manipulation with detailed console logging
+5. The extension icon should appear in your toolbar
 
-### Lightstreamer Integration
+### Method 2: Install from Chrome Web Store
 
-The logger connects to `https://push.ls-tc.de:443` using three distinct subscriptions:
+*Coming soon - extension will be published to Chrome Web Store*
 
-| Subscription | Adapter | Mode | Fields | Purpose |
-|-------------|---------|------|---------|----------|
-| **QUOTES** | QUOTE | MERGE | 15 fields | Real-time quote updates |
-| **PUSHTABLE** | QUOTE | COMMAND | 11 fields | Push table with trades/quotes |
-| **REALTIME** | REALTIME | MERGE | 9 fields | Real-time trade updates |
+## ⚙️ Configuration
 
-### Field Processing Logic
+### Adding Instruments
 
-The system only logs fields that:
-- ✅ Have changed from their previous value
-- ✅ Are not null or empty
-- ✅ Match specific field names in switch statements
-- ✅ Are properly processed by table type (trades vs quotes)
+1. Click the extension icon in your toolbar
+2. Click "Options" to open the configuration page
+3. Add instruments using their ISIN codes:
+   - **NVIDIA**: `US67066G1040`
+   - **Rheinmetall**: `DE0007030009`
+   - **Custom stocks**: Enter any ISIN from ls-tc.de
 
-## 🚀 Usage
+### Alert Settings
 
-### Quick Start
+Configure your alert preferences:
+- **Minimum Trade Size**: Set threshold for trade notifications
+- **Price Change Alerts**: Get notified on significant price movements
+- **Sound Notifications**: Enable/disable audio alerts
 
-```bash
-# Install dependencies
-npm install
+## 🎯 Usage
 
-# Run the main logger
-node index.js
+1. **Open ls-tc.de**: Navigate to any instrument page on https://www.ls-tc.de/
+2. **Extension Auto-Activates**: The extension detects the domain and starts monitoring
+3. **View Live Data**: Click the extension icon to see recent events
+4. **Get Notifications**: Receive alerts for significant trades and price changes
 
-# Or use the standalone library (for embedding in other projects)
-node lib.js
-```
+### Popup Interface
 
-### Output Format
-
-The logger produces structured output with visual indicators for each stock:
-
-#### Connection Status
-```
-🚀 Starting Multi-Stock Lightstreamer Logger...
-📊 Watching 2 stock(s): NVIDIA CORP., APPLE INC.
-📋 Stock mappings:
-   📈 WKN 554550 -> 43763@1 (NVIDIA CORP.)
-   📈 WKN 865985 -> XXXXXXX@1 (APPLE INC.)
-🌐 Loading stock page...
-📊 Connected to: https://push.ls-tc.de:443
-📊 Client status: CONNECTED:WS-STREAMING
-✅ QUOTES subscribed with 15 fields for 2 stocks
-✅ PUSHTABLE subscribed with 11 fields for 2 stocks
-✅ REALTIME subscribed with 9 fields for 2 stocks
-```
-
-#### Real-time Data Updates
-
-**QUOTES Subscription:**
-```
-📊 ===== QUOTES UPDATE (NVIDIA CORP.) =====
-🎯 Item: 43763@1
-📊 BID: 151.02  🟢 ↗️ [43763@1] 20.8.2025, 12:32:50
-📊 HTML UPDATE: [item="43763@1"][field="bid"][table="quotes"] = "151.02" (background: #005D42) [trend: pos]
-📊 ASK: 151.06  🟢 ↗️ [43763@1] 20.8.2025, 12:32:50  
-📊 HTML UPDATE: [item="43763@1"][field="ask"][table="quotes"] = "151.06" (background: #005D42) [trend: pos]
-```
-
-**Multi-Stock Processing:**
-```
-📊 ===== QUOTES UPDATE (NVIDIA CORP.) =====
-🎯 Item: 43763@1
-📊 BID: 151.02  🟢 ↗️ [43763@1] 20.8.2025, 12:32:50
-
-📊 ===== QUOTES UPDATE (APPLE INC.) =====
-🎯 Item: XXXXXXX@1
-📊 BID: 189.50  🔴 ↘️ [XXXXXXX@1] 20.8.2025, 12:32:51
-```
-
-**PUSHTABLE Subscription (Dual Table Processing):**
-```
-📊 ===== PUSHTABLE UPDATE =====
-🎯 Item: 43763@1
-📊 ASK: 151.06  🟢 ↗️ [43763@1] [trades] 20.8.2025, 12:32:50
-📊 HTML UPDATE: [field='ask'] = "151.06" (background: #005D42)
-📊 ASK: 151.06  🟢 ↗️ [43763@1] [quotes] 20.8.2025, 12:32:50  
-📊 HTML UPDATE: [field='ask'] = "151.06" (background: #005D42)
-```
-
-### Visual Indicators
-
-| Symbol | Meaning | Background Color |
-|--------|---------|------------------|
-| 🟢 ↗️ | Positive trend | `#005D42` (Green) |
-| 🔴 ↘️ | Negative trend | `#BE2D36` (Red) |
-| 🟡 ➡️ | Equal/No change | `#CCCCCC` (Gray) |
-
-## 📊 Output Analysis
-
-### Data Fields Logged
-
-**Core Price Fields:**
-- `trade`, `bid`, `ask` - Current prices with trend indicators
-- `tradeTime`, `bidTime`, `askTime` - Microsecond precision timestamps
-- `tradeSize`, `bidSize`, `askSize` - Volume information
-
-**Formatted Fields:**
-- `tradeWithCurrency`, `bidWithCurrency`, `askWithCurrency` - Price + currency
-- `displayName`, `isin`, `instrumentId` - Security identification
-
-### Table Type Processing
-
-The PUSHTABLE subscription processes both table types:
-- **[trades]** - Trade-specific data and logic
-- **[quotes]** - Quote-specific data and logic
-
-This dual processing replicates the original behavior where different DOM elements had different `data("type")` attributes.
+The extension popup shows:
+- **Last 20 Events**: Recent quotes and trades
+- **Real-Time Prices**: Current bid/ask with spread
+- **Trade Notifications**: Large trades with buy/sell direction
+- **Instrument Names**: Clear identification of each stock
 
 ## 🔧 Technical Details
 
-### Dependencies
-```json
-{
-  "puppeteer": "^22.12.1"
-}
-```
-
-### Browser Requirements
-- Runs in headless Chrome via Puppeteer
-- Loads the actual NVIDIA stock page from ls-tc.de
-- Executes embedded lightstreamer-push logic in browser context
-
-### Performance
-- Real-time WebSocket streaming
-- Efficient field filtering (only changed, non-null values)
-- Minimal memory footprint with proper cleanup
-
-## 🎯 Use Cases
-
-1. **Multi-Stock Portfolio Analysis** - Monitor multiple stocks simultaneously in real-time
-2. **Cross-Stock Market Research** - Compare price movements and volume patterns across different securities
-3. **Algorithm Development** - Use logged data for trading algorithm backtesting across multiple assets
-4. **Market Surveillance** - Monitor specific stock watchlists for unusual activity  
-5. **System Integration** - Embed the logger in larger financial applications for multi-stock tracking
-6. **Debugging** - Understand how original lightstreamer-push.js processes data for multiple stocks
-
-## 📝 Example Session Output
+### Architecture
 
 ```
-🚀 Starting Multi-Stock Lightstreamer Logger...
-📊 Watching 2 stock(s): NVIDIA CORP., APPLE INC.
-
-📊 ===== QUOTES UPDATE (NVIDIA CORP.) =====
-📊 BID: 150.98  🔴 ↘️ [43763@1] 20.8.2025, 12:33:17
-📊 HTML UPDATE: [item="43763@1"][field="bid"][table="quotes"] = "150.98" (background: #BE2D36) [trend: neg]
-
-📊 ===== QUOTES UPDATE (APPLE INC.) =====  
-📊 ASK: 189.45  � ↗️ [XXXXXXX@1] 20.8.2025, 12:33:18
-📊 HTML UPDATE: [item="XXXXXXX@1"][field="ask"][table="quotes"] = "189.45" (background: #005D42) [trend: pos]
-
-📊 ===== PUSHTABLE UPDATE (NVIDIA CORP.) =====
-📊 ASK: 151.00  🔴 ↘️ [43763@1] [trades] 20.8.2025, 12:33:18
-📊 HTML UPDATE: [field='ask'] = "151.00" (background: #BE2D36)
+chrome-extension/
+├── manifest.json          # Extension configuration
+├── content.js            # Injects into ls-tc.de pages
+├── injected.js          # Integrates with LightstreamerClient
+├── background.js        # Processes events and sends alerts
+├── popup.html/js        # Extension popup interface
+├── options.html/js      # Configuration page
+└── utils/              # Helper modules
+    ├── config.js       # ISIN-based instrument lookup
+    ├── alerts.js       # Notification system
+    └── webhooks.js     # External integrations
 ```
 
-This shows simultaneous monitoring with NVIDIA declining and Apple gaining, with proper stock identification in each update.
+### Key Features
+
+- **Domain Restriction**: Only works on `https://www.ls-tc.de/`
+- **Single Tab Injection**: Prevents duplicate monitoring across tabs
+- **LightStreamer Integration**: Reuses existing page connections
+- **Event Processing**: Real-time trade and quote analysis
+- **Storage Management**: Persists configuration and recent events
+
+## 🛠️ Development
+
+### Building the Extension
+
+No build process required - the extension runs directly from source files.
+
+### Testing
+
+1. Load the extension in developer mode
+2. Open browser DevTools on any ls-tc.de page
+3. Check console for extension logs:
+   ```
+   🔍 LS Stock Ticker content script loaded
+   ✅ Monitoring 2 instruments
+   📊 QUOTE update received for: NVIDIA CORP.
+   ```
+
+### Debugging
+
+Common issues and solutions:
+
+- **"Extension already injected"**: Close other ls-tc.de tabs
+- **No events showing**: Check if instruments are configured in options
+- **Console errors**: Reload the extension and refresh the page
+
+## 📁 Project Structure
+
+- **`/chrome-extension/`** - Chrome extension (this folder)
+- **`/node-app/`** - Standalone Node.js application for server-side monitoring
+
+## 📄 License
+
+MIT License - see [LICENSE](LICENSE) for details
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Test with real ls-tc.de data
+5. Submit a pull request
+
+## 🐛 Issues & Support
+
+Report issues on [GitHub Issues](https://github.com/childscreentime/ls-stock-ticker/issues)
+
+Include:
+- Chrome version
+- Extension version
+- Console error messages
+- Steps to reproduce
+
+---
+
+*Built for real-time stock monitoring on Lang & Schwarz Trading Center*
