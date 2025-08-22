@@ -25,7 +25,7 @@
             this.version = "1.0.0";
         }
 
-        handleTrade(tradePrice, tradeSize, tradeTime, direction) {
+        handleTrade(tradePrice, tradeSize, tradeTime, direction, instrument = null) {
             const directionIcon = direction === 'BUY' ? '🟢' : direction === 'SELL' ? '🔴' : '🟡';
             const directionText = direction === 'BUY' ? 'BUY' : direction === 'SELL' ? 'SELL' : 'UNKNOWN';
             
@@ -37,36 +37,46 @@
             console.log(`[BROWSER LOG]: 🎯 Direction: ${directionText} ${directionIcon}`);
             console.log(`[BROWSER LOG]: `);
             
-            // Dispatch to extension
+            // Dispatch to extension with instrument info
             dispatchEvent('TRADE', {
                 kind: 'TRADE',
                 price: parseFloat(tradePrice),
                 size: parseInt(tradeSize) || parseFloat(tradeSize),
                 side: direction.toLowerCase(),
-                ts: new Date(tradeTime).getTime()
+                ts: new Date(tradeTime).getTime(),
+                // Include instrument information for popup display
+                name: instrument?.name,
+                wkn: instrument?.wkn,
+                isin: instrument?.isin,
+                item: instrument?.item
             });
         }
 
-        handleQuoteUpdate(bid, ask, time) {
-            console.log(`[BROWSER LOG]: `);
+        handleQuoteUpdate(bid, ask, time, instrument = null) {
+            // Use original logging format but include instrument info
             console.log(`[BROWSER LOG]: 📋 QUOTE UPDATE:`);
-            if (bid !== null && bid !== undefined) {
-                console.log(`[BROWSER LOG]: 🟢 BID: ${bid}`);
+            if (bid) {
+                console.log(`[BROWSER LOG]: � Bid: ${bid}`);
             }
-            if (ask !== null && ask !== undefined) {
-                console.log(`[BROWSER LOG]: 🔴 ASK: ${ask}`);
+            if (ask) {
+                console.log(`[BROWSER LOG]: 🏷️ Ask: ${ask}`);
             }
             if (time) {
                 console.log(`[BROWSER LOG]: ⏰ Time: ${time}`);
             }
             console.log(`[BROWSER LOG]: `);
             
-            // Dispatch to extension
+            // Dispatch to extension with instrument info
             dispatchEvent('QUOTE', {
                 kind: 'QUOTE',
                 bid: bid ? parseFloat(bid) : null,
                 ask: ask ? parseFloat(ask) : null,
-                ts: time ? new Date(time).getTime() : Date.now()
+                ts: time ? new Date(time).getTime() : Date.now(),
+                // Include instrument information for popup display
+                name: instrument?.name,
+                wkn: instrument?.wkn,
+                isin: instrument?.isin,
+                item: instrument?.item
             });
         }
 
@@ -209,21 +219,24 @@
     function setupSubscriptions(client) {
         // Get instrument info from page (extract WKN/ID from URL or page content)
         const instrumentInfo = extractInstrumentInfo();
-        if (!instrumentInfo) {
+        if (!instrumentInfo || !instrumentInfo.instruments || instrumentInfo.instruments.length === 0) {
             console.log('⚠️ Could not extract instrument info from page');
             return;
         }
         
-        console.log('📋 Instrument info:', instrumentInfo);
+        console.log('📋 Instrument data:', instrumentInfo);
         
         // Wait for client to be connected
         const checkConnection = () => {
-            const status = client.getStatus ? client.getStatus() : 'UNKNOWN';
-            console.log(`📊 Client status: ${status}`);
+            const status = client.getStatus();
+            console.log('📊 Client status:', status);
             
             if (status.includes('CONNECTED') && (status.includes('STREAMING') || status.includes('POLLING'))) {
                 console.log('🎉 Connected! Setting up our subscriptions...');
                 createOurSubscriptions(client, instrumentInfo);
+            } else if (status === 'DISCONNECTED') {
+                console.log('🔄 Client disconnected, will retry...');
+                setTimeout(checkConnection, 2000);
             } else {
                 console.log('⏳ Waiting for connection...');
                 setTimeout(checkConnection, 1000);
@@ -234,20 +247,48 @@
     }
     
     function extractInstrumentInfo() {
-        // First try to get info from the DOM element created by content script
-        const dataElement = document.getElementById('ls-instrument-data');
+        // First try to get watchlist info from the DOM element created by content script
+        const dataElement = document.getElementById('ls-watchlist-data');
         if (dataElement) {
             try {
-                const instrumentData = JSON.parse(dataElement.getAttribute('data-instrument'));
-                console.log('📋 Using instrument info from content script:', instrumentData);
+                const watchlistData = JSON.parse(dataElement.getAttribute('data-watchlist'));
+                console.log('📋 Using watchlist info from content script:', watchlistData);
+                
+                // Convert watchlist to array of instrument info for subscriptions
+                const instruments = Object.entries(watchlistData).map(([wkn, instrument]) => ({
+                    id: instrument.id,
+                    item: `${instrument.id}@1`,
+                    name: instrument.name,
+                    wkn: wkn,
+                    isin: instrument.isin
+                }));
+                
+                console.log(`📊 Found ${instruments.length} instruments in watchlist:`, 
+                    instruments.map(i => `${i.name} (${i.wkn})`));
+                
+                return { instruments, isWatchlist: true };
+            } catch (e) {
+                console.log('⚠️ Failed to parse watchlist data from DOM element:', e);
+            }
+        }
+
+        // Fallback: Legacy single instrument data
+        const legacyDataElement = document.getElementById('ls-instrument-data');
+        if (legacyDataElement) {
+            try {
+                const instrumentData = JSON.parse(legacyDataElement.getAttribute('data-instrument'));
+                console.log('📋 Using legacy single instrument info from content script:', instrumentData);
                 return {
-                    id: instrumentData.id || '43763', // fallback to NVIDIA
-                    item: instrumentData.id ? `${instrumentData.id}@1` : '43763@1',
-                    name: instrumentData.name || document.title,
-                    wkn: instrumentData.wkn
+                    instruments: [{
+                        id: instrumentData.id || '43763',
+                        item: instrumentData.id ? `${instrumentData.id}@1` : '43763@1',
+                        name: instrumentData.name || document.title,
+                        wkn: instrumentData.wkn
+                    }],
+                    isWatchlist: false
                 };
             } catch (e) {
-                console.log('⚠️ Failed to parse instrument data from DOM element:', e);
+                console.log('⚠️ Failed to parse legacy instrument data from DOM element:', e);
             }
         }
         
@@ -256,9 +297,12 @@
         if (pathMatch) {
             const instrumentId = pathMatch[1];
             return {
-                id: instrumentId,
-                item: `${instrumentId}@1`,
-                name: document.title
+                instruments: [{
+                    id: instrumentId,
+                    item: `${instrumentId}@1`,
+                    name: document.title
+                }],
+                isWatchlist: false
             };
         }
         
@@ -268,9 +312,12 @@
             const id = elem.getAttribute('data-instrument-id') || elem.getAttribute('data-id');
             if (id && /^\d+$/.test(id)) {
                 return {
-                    id: id,
-                    item: `${id}@1`,
-                    name: document.title
+                    instruments: [{
+                        id: id,
+                        item: `${id}@1`,
+                        name: document.title
+                    }],
+                    isWatchlist: false
                 };
             }
         }
@@ -278,28 +325,44 @@
         // Last resort: use NVIDIA default for testing
         console.log('⚠️ Could not extract instrument info, using NVIDIA default');
         return {
-            id: '43763',
-            item: '43763@1',
-            name: 'NVIDIA CORP. DL-,001',
-            wkn: '918422'
+            instruments: [{
+                id: '43763',
+                item: '43763@1',
+                name: 'NVIDIA CORP. DL-,001',
+                wkn: '918422'
+            }],
+            isWatchlist: false
         };
     }
     
     function createOurSubscriptions(client, instrumentInfo) {
         console.log('📊 Creating subscriptions matching original index.js logic...');
         
+        // Create item list from all instruments
+        const itemList = instrumentInfo.instruments.map(inst => inst.item);
+        console.log('📋 Subscribing to items:', itemList);
+        
         // Exact field lists from original index.js
         const quoteFieldList = ["instrumentId", "isin", "displayName", "trade", "bid", "ask", "tradeTime", "bidTime", "askTime", "tradeSize", "bidSize", "askSize", "categoryId", "currencySymbol", "currencyISO"];
         const pushtableFieldList = ["ask", "askTime", "askSize", "bid", "bidTime", "bidSize", "trade", "tradeTime", "tradeSize", "currencySymbol", "categoryId"];
         
         // QUOTES subscription (for price tracking)
-        const quoteSubscription = new Subscription("MERGE", [instrumentInfo.item], quoteFieldList);
+        const quoteSubscription = new Subscription("MERGE", itemList, quoteFieldList);
         
         quoteSubscription.addListener({
             onSubscription: function() {
-                console.log('✅ QUOTES subscription active');
+                console.log('✅ QUOTES subscription active for items:', itemList);
             },
             onItemUpdate: function(update) {
+                // Get the item name for this specific update
+                const itemName = update.getItemName();
+                
+                // Find the corresponding instrument for better logging
+                const instrument = instrumentInfo.instruments.find(inst => inst.item === itemName);
+                const instrumentName = instrument ? instrument.name : itemName;
+                
+                console.log('📈 QUOTE update received for:', instrumentName, '(', itemName, ')');
+                
                 // Extract bid/ask data exactly like original
                 const bid = update.getValue("bid");
                 const ask = update.getValue("ask");
@@ -323,8 +386,8 @@
                     console.log(`📈 PRICE DICT: ${Object.keys(priceDict).length} entries, latest: ${latestTimestamp}`);
                     console.log(`📈 LATEST PRICES: ${JSON.stringify(priceDict[latestTimestamp], null, 2)}`);
                     
-                    // Call quote handler
-                    tradingHandler.handleQuoteUpdate(bid, ask, latestTimestamp);
+                    // Call quote handler with instrument info
+                    tradingHandler.handleQuoteUpdate(bid, ask, latestTimestamp, instrument);
                 }
             }
         });
@@ -334,15 +397,22 @@
         client.subscribe(quoteSubscription);
         
         // PUSHTABLE subscription (for trade executions)
-        const pushtableSubscription = new Subscription("MERGE", [instrumentInfo.item], pushtableFieldList);
+        const pushtableSubscription = new Subscription("MERGE", itemList, pushtableFieldList);
         
         pushtableSubscription.addListener({
             onSubscription: function() {
-                console.log('✅ PUSHTABLE subscription active');
+                console.log('✅ PUSHTABLE subscription active for items:', itemList);
             },
             onItemUpdate: function(update) {
+                // Get the item name for this specific update
+                const itemName = update.getItemName();
+                
+                // Find the corresponding instrument for better logging
+                const instrument = instrumentInfo.instruments.find(inst => inst.item === itemName);
+                const instrumentName = instrument ? instrument.name : itemName;
+                
                 // Debug: Log ALL field values to see what's being received
-                console.log('📊 PUSHTABLE update received for:', itemName);
+                console.log('📊 PUSHTABLE update received for:', instrumentName, '(', itemName, ')');
                 
                 // Log all fields present in this update
                 const allFields = {};
@@ -387,8 +457,8 @@
                         
                         console.log(`🔥 TRADE EXECUTION: ${trade} × ${tradeSize} at ${tradeTime} (${decision})`);
                         
-                        // Use exact same handler call as original
-                        tradingHandler.handleTrade(trade, tradeSize, tradeTime, decision);
+                        // Use exact same handler call as original with instrument info
+                        tradingHandler.handleTrade(trade, tradeSize, tradeTime, decision, instrument);
                     } else {
                         console.log(`⚠️ INCOMPLETE TRADE DATA: trade=${trade}, tradeTime=${tradeTime}, tradeSize=${tradeSize}`);
                     }
@@ -412,8 +482,8 @@
                     if (bid) priceDict[timestamp].bid = parseFloat(bid);
                     if (ask) priceDict[timestamp].ask = parseFloat(ask);
                     
-                    // Call quote handler
-                    tradingHandler.handleQuoteUpdate(bid, ask, timestamp);
+                    // Call quote handler with instrument info
+                    tradingHandler.handleQuoteUpdate(bid, ask, timestamp, instrument);
                 }
             }
         });

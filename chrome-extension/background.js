@@ -69,6 +69,9 @@ class BackgroundService {
             console.log('🔄 Configuration updated, refreshing tabs...');
             await this.setupWatchlistTabs();
             sendResponse({ status: 'refreshed' });
+        } else if (message.action === 'checkOtherLsTcTabs') {
+            const result = await this.checkOtherLsTcTabs(message.currentUrl);
+            sendResponse(result);
         }
         return true; // Keep message channel open for async response
     }
@@ -88,6 +91,40 @@ class BackgroundService {
                 this.activeTabs.delete(wkn);
                 break;
             }
+        }
+
+        // Check if the removed tab was the injected tab and clean up
+        this.cleanupInjectedTabIfRemoved(tabId);
+    }
+
+    async cleanupInjectedTabIfRemoved(removedTabId) {
+        try {
+            // Since we're now using a simpler lock system, we don't need to track specific tab IDs
+            // The lock will naturally expire or be cleaned up by the content script logic
+            console.log(`🧹 Tab ${removedTabId} removed - injection lock will be cleaned up automatically if stale`);
+        } catch (error) {
+            console.error('❌ Failed to cleanup injection lock:', error);
+        }
+    }
+
+    async checkOtherLsTcTabs(currentUrl) {
+        try {
+            // Query all tabs to find other ls-tc.de tabs
+            const allTabs = await chrome.tabs.query({});
+            const lsTcTabs = allTabs.filter(tab => 
+                tab.url && 
+                tab.url.includes('ls-tc.de') && 
+                tab.url !== currentUrl
+            );
+
+            return {
+                hasOtherTabs: lsTcTabs.length > 0,
+                otherTabsCount: lsTcTabs.length,
+                otherTabUrls: lsTcTabs.map(tab => tab.url)
+            };
+        } catch (error) {
+            console.error('❌ Failed to check other ls-tc.de tabs:', error);
+            return { hasOtherTabs: false, otherTabsCount: 0 };
         }
     }
 
@@ -271,6 +308,7 @@ class BackgroundService {
         
         return status;
     }
+
 }
 
 // Initialize the background service

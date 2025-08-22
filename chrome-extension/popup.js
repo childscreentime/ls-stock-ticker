@@ -178,7 +178,7 @@ class PopupController {
                             <span class="event-time">${timeStr}</span>
                         </div>
                         <div class="event-details">
-                            <strong>${event.name || event.wkn}</strong><br>
+                            <strong>${eventData.name || eventData.wkn || 'Unknown Instrument'}</strong><br>
                             €${eventData.price?.toFixed(2) || 'N/A'} × ${eventData.size || 'N/A'} shares
                             ${eventData.price && eventData.size ? 
                                 `<br><small>Notional: €${(eventData.price * eventData.size).toLocaleString()}</small>` : 
@@ -195,7 +195,7 @@ class PopupController {
                             <span class="event-time">${timeStr}</span>
                         </div>
                         <div class="event-details">
-                            <strong>${event.name || event.wkn}</strong><br>
+                            <strong>${eventData.name || eventData.wkn || 'Unknown Instrument'}</strong><br>
                             Bid: €${eventData.bid?.toFixed(2) || 'N/A'} | Ask: €${eventData.ask?.toFixed(2) || 'N/A'}
                             ${eventData.bid && eventData.ask ? 
                                 `<br><small>Spread: €${(eventData.ask - eventData.bid).toFixed(2)}</small>` : 

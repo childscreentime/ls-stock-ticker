@@ -1,18 +1,34 @@
 // Content Script for LS Stock Ticker
-// Injects LightstreamerClient integration and extracts page context
+// Injects LightstreamerClient script to reuse page origin
+// Monitors ALL configured instruments from watchlist
+// Only works on https://www.ls-tc.de/ domain and prevents duplicate injection
 
 class LSContentScript {
     constructor() {
-        this.wkn = null;
-        this.instrumentName = null;
-        this.instrumentId = null;
-        this.item = null;
-        
-        this.init();
+        this.watchlistData = null;
+        this.isInjected = false;
     }
 
     async init() {
-        console.log('🔍 LS Stock Ticker content script loaded');
+        // Check if we're on the correct domain
+        if (!this.isValidDomain()) {
+            console.log('⚠️ LS Stock Ticker: Not on ls-tc.de domain, skipping initialization');
+            return;
+        }
+
+        // Check if already injected globally (check if other ls-tc.de tabs exist)
+        if (await this.hasOtherLsTcTabs()) {
+            console.log('⚠️ LS Stock Ticker: Another ls-tc.de tab is already open, skipping this tab');
+            return;
+        }
+
+        // Check if already injected locally on this page
+        if (this.isAlreadyInjected()) {
+            console.log('⚠️ LS Stock Ticker: Already injected on this page, skipping');
+            return;
+        }
+
+        console.log('🔍 LS Stock Ticker content script loaded on ls-tc.de');
         
         // Check extension context validity
         if (!chrome.runtime?.id) {
@@ -20,11 +36,11 @@ class LSContentScript {
             return;
         }
         
-        // Extract instrument info from page
-        this.extractInstrumentInfo();
+        // Load watchlist configuration
+        await this.loadWatchlistConfig();
         
         // Inject the LightstreamerClient integration script
-        this.injectIntegrationScript();
+        await this.injectIntegrationScript();
         
         // Listen for events from the injected script
         window.addEventListener('LS_TICKER_EVENT', (event) => {
@@ -33,6 +49,50 @@ class LSContentScript {
         
         // Monitor extension context validity
         this.monitorExtensionContext();
+    }
+
+    async hasOtherLsTcTabs() {
+        try {
+            // Ask background script to check for other ls-tc.de tabs
+            const response = await chrome.runtime.sendMessage({
+                action: 'checkOtherLsTcTabs',
+                currentUrl: window.location.href
+            });
+            
+            if (response && response.hasOtherTabs) {
+                console.log(`⚠️ Found ${response.otherTabsCount} other ls-tc.de tab(s)`);
+                return true;
+            }
+            
+            return false;
+        } catch (error) {
+            console.error('❌ Failed to check other tabs:', error);
+            return false; // Allow injection if we can't check
+        }
+    }
+
+    isValidDomain() {
+        // Only allow https://www.ls-tc.de/
+        const allowedDomain = 'www.ls-tc.de';
+        const currentDomain = window.location.hostname;
+        const isHttps = window.location.protocol === 'https:';
+        
+        return isHttps && currentDomain === allowedDomain;
+    }
+
+    isAlreadyInjected() {
+        // Check if we've already injected our script
+        const existingElement = document.getElementById('ls-watchlist-data');
+        if (existingElement) {
+            return true;
+        }
+
+        // Also check if there's a marker in the window object
+        if (window.LS_TICKER_INJECTED) {
+            return true;
+        }
+
+        return false;
     }
 
     monitorExtensionContext() {
@@ -46,103 +106,54 @@ class LSContentScript {
         }, 10000); // Check every 10 seconds
     }
 
-    extractInstrumentInfo() {
-        // Extract instrument ID from URL path (e.g., /de/aktie/43763)
-        const pathMatch = window.location.pathname.match(/\/aktie\/(\d+)/);
-        if (pathMatch) {
-            this.instrumentId = pathMatch[1];
-            this.item = `${this.instrumentId}@1`;
-        }
-
-        // Try to extract instrument name from page title or content
-        this.instrumentName = document.title;
-        
-        const nameSelectors = [
-            'h1',
-            '.instrument-name', 
-            '.security-name',
-            '[data-instrument-name]',
-            '.stock-name',
-            '.quote-header h1'
-        ];
-        
-        for (const selector of nameSelectors) {
-            const element = document.querySelector(selector);
-            if (element && element.textContent.trim()) {
-                this.instrumentName = element.textContent.trim();
-                break;
+    async loadWatchlistConfig() {
+        try {
+            const result = await chrome.storage.local.get(['watchlist']);
+            this.watchlistData = result.watchlist || {};
+            
+            if (Object.keys(this.watchlistData).length === 0) {
+                console.log('⚠️ No instruments configured in watchlist. Please add instruments via ISIN in the options page.');
+                return;
             }
-        }
 
-        // Try to extract WKN from page content
-        const wknSelectors = [
-            '[data-wkn]',
-            '.wkn',
-            '[title*="WKN"]',
-            '.instrument-details .wkn'
-        ];
-        
-        for (const selector of wknSelectors) {
-            const element = document.querySelector(selector);
-            if (element) {
-                this.wkn = element.getAttribute('data-wkn') || 
-                          element.textContent.match(/WKN[:\s]*([A-Z0-9]+)/i)?.[1];
-                if (this.wkn) break;
-            }
+            console.log(`✅ Loaded ${Object.keys(this.watchlistData).length} instruments from watchlist:`, 
+                Object.values(this.watchlistData).map(inst => `${inst.name} (${inst.isin})`));
+                
+        } catch (error) {
+            console.error('❌ Failed to load watchlist config:', error);
         }
-
-        // Alternative: extract from meta tags
-        if (!this.wkn) {
-            const metaWkn = document.querySelector('meta[name="wkn"], meta[property="wkn"]');
-            if (metaWkn) {
-                this.wkn = metaWkn.getAttribute('content');
-            }
-        }
-
-        // Try to extract WKN from page text as fallback
-        if (!this.wkn) {
-            const bodyText = document.body.textContent;
-            const wknMatch = bodyText.match(/WKN[:\s]*([A-Z0-9]{6})/i);
-            if (wknMatch) {
-                this.wkn = wknMatch[1];
-            }
-        }
-
-        console.log('📋 Extracted instrument info:', {
-            id: this.instrumentId,
-            wkn: this.wkn,
-            name: this.instrumentName,
-            item: this.item,
-            url: window.location.href
-        });
     }
 
-    injectIntegrationScript() {
-        // Store instrument info for the injected script to access
-        const instrumentInfo = {
-            id: this.instrumentId,
-            wkn: this.wkn,
-            name: this.instrumentName,
-            item: this.item,
-            url: window.location.href
-        };
-        
-        // Pass instrument info to page context via DOM element data attribute
-        // This avoids CSP issues with inline scripts
+    async injectIntegrationScript() {
+        // Always inject script to monitor ALL configured instruments
+        if (!this.watchlistData || Object.keys(this.watchlistData).length === 0) {
+            console.log('⚠️ No watchlist data available. Skipping LightstreamerClient injection.');
+            console.log('💡 Please configure instruments via ISIN in the options page.');
+            return;
+        }
+
+        // Mark injection to prevent duplicates locally
+        window.LS_TICKER_INJECTED = true;
+
+        // Pass entire watchlist to injected script for monitoring all instruments
         const dataElement = document.createElement('div');
-        dataElement.id = 'ls-instrument-data';
+        dataElement.id = 'ls-watchlist-data';
         dataElement.style.display = 'none';
-        dataElement.setAttribute('data-instrument', JSON.stringify(instrumentInfo));
+        dataElement.setAttribute('data-watchlist', JSON.stringify(this.watchlistData));
         document.body.appendChild(dataElement);
         
         const script = document.createElement('script');
         script.src = chrome.runtime.getURL('injected.js');
         script.onload = () => {
-            console.log('✅ LightstreamerClient integration script injected');
+            console.log('✅ LightstreamerClient integration script injected on ls-tc.de (PRIMARY TAB)');
+            console.log(`📊 Monitoring ${Object.keys(this.watchlistData).length} instruments`);
+            this.isInjected = true;
             script.remove();
         };
         script.onerror = () => {
             console.error('❌ Failed to inject LightstreamerClient integration script');
+            // Reset injection markers on failure
+            window.LS_TICKER_INJECTED = false;
         };
         
         (document.head || document.documentElement).appendChild(script);
@@ -151,14 +162,10 @@ class LSContentScript {
     handleLightstreamerEvent(eventData) {
         console.log('📊 Received LS event:', eventData);
         
-        // Enhance event with page context
+        // Forward event to background script with minimal processing
         const enhancedEvent = {
             type: 'LS_EVENT',
-            wkn: this.wkn || this.instrumentId, // Use WKN if available, fallback to ID
-            name: this.instrumentName,
-            item: this.item,
             event: eventData.event,
-            url: window.location.href,
             timestamp: Date.now()
         };
 
@@ -197,20 +204,42 @@ if (document.readyState === 'loading') {
     initializeContentScript();
 }
 
-function initializeContentScript() {
+async function initializeContentScript() {
     try {
+        // Double-check domain before any initialization
+        const allowedDomain = 'www.ls-tc.de';
+        const currentDomain = window.location.hostname;
+        const isHttps = window.location.protocol === 'https:';
+        
+        if (!isHttps || currentDomain !== allowedDomain) {
+            console.log(`⚠️ LS Stock Ticker: Wrong domain (${window.location.hostname}), extension only works on https://www.ls-tc.de/`);
+            return;
+        }
+
         // Check if extension context is valid before initializing
         if (!chrome.runtime?.id) {
             console.log('⚠️ Extension context invalidated, skipping content script initialization');
             console.log('💡 Please reload the page to reinitialize the extension');
             return;
         }
+
+        // Check for duplicate initialization in this tab
+        if (window.LS_TICKER_INITIALIZED) {
+            console.log('⚠️ LS Stock Ticker: Already initialized in this tab, preventing duplicate initialization');
+            return;
+        }
+
+        // Mark as initialized locally
+        window.LS_TICKER_INITIALIZED = true;
         
-        new LSContentScript();
+        const contentScript = new LSContentScript();
+        await contentScript.init();
     } catch (error) {
         console.error('❌ Failed to initialize LS Content Script:', error);
         if (error.message?.includes('Extension context invalidated')) {
             console.log('💡 Extension was reloaded. Please refresh the page.');
         }
+        // Reset initialization flag on error
+        window.LS_TICKER_INITIALIZED = false;
     }
 }
