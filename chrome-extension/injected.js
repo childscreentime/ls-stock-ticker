@@ -17,66 +17,106 @@
     let priceDict = {};
     let tradingHandler;
     let isInitialized = false;
+    let realtimeChart = null; // Chart instance
     
-    // Trading Event Handler (exact copy from original)
+    // Trading Event Handler
     class TradingEventHandler {
         constructor() {
             this.name = "TradingEventHandler";
             this.version = "1.0.0";
         }
 
-        handleTrade(tradePrice, tradeSize, tradeTime, direction, instrument = null) {
+        handleQuoteUpdate(bid, ask, timestamp, instrument) {
+            const price = ask || bid; // Use ask price primarily, fallback to bid
+            
+            if (price && instrument) {
+                console.log(`📈 Quote update: ${instrument.name} = €${price} at ${timestamp}`);
+                
+                // Update real-time chart ONLY if this is the current page's instrument
+                if (realtimeChart && realtimeChart.instrumentInfo.isin === instrument.isin) {
+                    const priceTimestamp = new Date(timestamp).getTime();
+                    realtimeChart.addPriceData(price, priceTimestamp);
+                    console.log(`📊 Chart updated for current page instrument: ${instrument.name}`);
+                }
+                
+                // Show quote notification for ALL instruments
+                this.showQuoteNotification(bid, ask, timestamp, instrument);
+            }
+        }
+        
+        handleTrade(price, size, timestamp, direction, instrument) {
+            console.log(`🔥 Trade execution: ${instrument?.name || 'Unknown'} ${direction} ${size} × €${price} at ${timestamp}`);
+            
+            // Update real-time chart ONLY if this is the current page's instrument
+            if (realtimeChart && instrument && realtimeChart.instrumentInfo.isin === instrument.isin) {
+                const tradeTimestamp = new Date(timestamp).getTime();
+                const tradeSide = direction.toLowerCase();
+                realtimeChart.addTradeData(price, size, tradeSide, tradeTimestamp);
+                console.log(`📊 Chart trade data updated for current page instrument: ${instrument.name}`);
+            }
+            
+            // Show notification for ALL instruments (not just current page)
+            this.showNotification(price, size, timestamp, direction, instrument);
+        }
+        
+        showQuoteNotification(bid, ask, timestamp, instrument) {
+            if (!instrument) {
+                console.log('⚠️ No instrument info for quote notification');
+                return;
+            }
+            
+            console.log(`[BROWSER LOG]: `);
+            console.log(`[BROWSER LOG]: 📈 QUOTE UPDATE:`);
+            console.log(`[BROWSER LOG]: 💰 Bid: €${bid || 'N/A'}`);
+            console.log(`[BROWSER LOG]: 💰 Ask: €${ask || 'N/A'}`);
+            console.log(`[BROWSER LOG]: ⏰ Time: ${timestamp}`);
+            console.log(`[BROWSER LOG]: 📈 Instrument: ${instrument.name} (${instrument.wkn})`);
+            console.log(`[BROWSER LOG]: `);
+            
+            // Dispatch to extension for popup display (ALL instruments)
+            dispatchEvent('QUOTE', {
+                kind: 'QUOTE',
+                bid: bid ? parseFloat(bid) : null,
+                ask: ask ? parseFloat(ask) : null,
+                ts: new Date(timestamp).getTime(),
+                // Include instrument information for popup display
+                name: instrument.name,
+                wkn: instrument.wkn,
+                isin: instrument.isin,
+                price: ask || bid // Primary price for display
+            });
+        }
+        
+        showNotification(price, size, timestamp, direction, instrument) {
+            if (!instrument) {
+                console.log('⚠️ No instrument info for notification');
+                return;
+            }
+            
             const directionIcon = direction === 'BUY' ? '🟢' : direction === 'SELL' ? '🔴' : '🟡';
             const directionText = direction === 'BUY' ? 'BUY' : direction === 'SELL' ? 'SELL' : 'UNKNOWN';
             
             console.log(`[BROWSER LOG]: `);
             console.log(`[BROWSER LOG]: 🔥 TRADE EXECUTED:`);
-            console.log(`[BROWSER LOG]: 💰 Price: ${tradePrice}`);
-            console.log(`[BROWSER LOG]: 📊 Size: ${tradeSize} shares`);
-            console.log(`[BROWSER LOG]: ⏰ Time: ${tradeTime}`);
+            console.log(`[BROWSER LOG]: 💰 Price: €${price}`);
+            console.log(`[BROWSER LOG]: 📊 Size: ${size} shares`);
+            console.log(`[BROWSER LOG]: ⏰ Time: ${timestamp}`);
             console.log(`[BROWSER LOG]: 🎯 Direction: ${directionText} ${directionIcon}`);
+            console.log(`[BROWSER LOG]: 📈 Instrument: ${instrument.name} (${instrument.wkn})`);
             console.log(`[BROWSER LOG]: `);
             
-            // Dispatch to extension with instrument info
+            // Dispatch to extension for popup display (ALL instruments)
             dispatchEvent('TRADE', {
                 kind: 'TRADE',
-                price: parseFloat(tradePrice),
-                size: parseInt(tradeSize) || parseFloat(tradeSize),
+                price: parseFloat(price),
+                size: parseInt(size) || parseFloat(size),
                 side: direction.toLowerCase(),
-                ts: new Date(tradeTime).getTime(),
+                ts: new Date(timestamp).getTime(),
                 // Include instrument information for popup display
-                name: instrument?.name,
-                wkn: instrument?.wkn,
-                isin: instrument?.isin,
-                item: instrument?.item
-            });
-        }
-
-        handleQuoteUpdate(bid, ask, time, instrument = null) {
-            // Use original logging format but include instrument info
-            console.log(`[BROWSER LOG]: 📋 QUOTE UPDATE:`);
-            if (bid) {
-                console.log(`[BROWSER LOG]: � Bid: ${bid}`);
-            }
-            if (ask) {
-                console.log(`[BROWSER LOG]: 🏷️ Ask: ${ask}`);
-            }
-            if (time) {
-                console.log(`[BROWSER LOG]: ⏰ Time: ${time}`);
-            }
-            console.log(`[BROWSER LOG]: `);
-            
-            // Dispatch to extension with instrument info
-            dispatchEvent('QUOTE', {
-                kind: 'QUOTE',
-                bid: bid ? parseFloat(bid) : null,
-                ask: ask ? parseFloat(ask) : null,
-                ts: time ? new Date(time).getTime() : Date.now(),
-                // Include instrument information for popup display
-                name: instrument?.name,
-                wkn: instrument?.wkn,
-                isin: instrument?.isin,
-                item: instrument?.item
+                name: instrument.name,
+                wkn: instrument.wkn,
+                isin: instrument.isin,
+                direction: direction
             });
         }
 
@@ -93,6 +133,352 @@
             if (enabled) {
                 console.log(`[DEBUG]: ${message}`);
             }
+        }
+    }
+    
+    // Real-time Chart Renderer using LightweightCharts
+    class RealtimeChart {
+        constructor(containerId, instrumentInfo) {
+            this.containerId = containerId;
+            this.instrumentInfo = instrumentInfo;
+            this.chart = null;
+            this.lineSeries = null;
+            this.volumeSeries = null; // For trade volume bars
+            this.priceData = []; // Array of {time, value}
+            this.volumeData = []; // Array of {time, value, color}
+            this.isLibraryLoaded = false;
+            
+            // Clean up any existing chart with the same ID before creating new one
+            this.cleanupExistingChart();
+            
+            this.init();
+        }
+        
+        cleanupExistingChart() {
+            const existingContainer = document.getElementById(this.containerId);
+            if (existingContainer) {
+                console.log('🧹 Removing existing chart container:', this.containerId);
+                existingContainer.remove();
+            }
+        }
+        
+        async init() {
+            await this.loadLibrary();
+            this.createChartContainer();
+            this.initializeChart();
+        }
+        
+        async loadLibrary() {
+            // Check if library is already loaded
+            if (window.LightweightCharts) {
+                this.isLibraryLoaded = true;
+                return;
+            }
+            
+            return new Promise((resolve, reject) => {
+                const script = document.createElement('script');
+                script.src = 'https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js';
+                script.onload = () => {
+                    this.isLibraryLoaded = true;
+                    console.log('📊 LightweightCharts library loaded successfully');
+                    resolve();
+                };
+                script.onerror = () => {
+                    console.error('❌ Failed to load LightweightCharts library');
+                    reject(new Error('Failed to load LightweightCharts library'));
+                };
+                document.head.appendChild(script);
+            });
+        }
+        
+        createChartContainer() {
+            // Find the ISIN container on the page
+            const isinContainers = document.querySelectorAll('.informerhead');
+            let targetContainer = null;
+            
+            for (const container of isinContainers) {
+                if (container.textContent.includes('ISIN:')) {
+                    targetContainer = container.parentElement;
+                    break;
+                }
+            }
+            
+            if (!targetContainer) {
+                console.log('⚠️ Could not find ISIN container for chart placement');
+                return;
+            }
+            
+            // Create chart container
+            const chartContainer = document.createElement('div');
+            chartContainer.id = this.containerId;
+            chartContainer.style.cssText = `
+                width: 100%;
+                background: #ffffff;
+                border: 1px solid #ddd;
+                border-radius: 8px;
+                margin: 20px 0;
+                padding: 15px;
+                position: relative;
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            `;
+            
+            // Chart title
+            const title = document.createElement('div');
+            title.style.cssText = `
+                color: #333;
+                font-size: 16px;
+                font-weight: 600;
+                margin-bottom: 15px;
+                text-align: center;
+            `;
+            title.textContent = `📈 ${this.instrumentInfo.name} - Real-time Chart`;
+            chartContainer.appendChild(title);
+            
+            // Chart div
+            const chartDiv = document.createElement('div');
+            chartDiv.id = `${this.containerId}-chart`;
+            chartDiv.style.cssText = `
+                width: 100%;
+                height: 400px;
+                background: #ffffff;
+                border-radius: 4px;
+            `;
+            chartContainer.appendChild(chartDiv);
+            
+            // Chart controls
+            const controls = document.createElement('div');
+            controls.style.cssText = `
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-top: 10px;
+                color: #666;
+                font-size: 12px;
+            `;
+            
+            const info = document.createElement('span');
+            info.textContent = `ISIN: ${this.instrumentInfo.isin} | WKN: ${this.instrumentInfo.wkn}`;
+            
+            const legend = document.createElement('span');
+            legend.innerHTML = `
+                <span style="color: #00ff88;">📈 Price Line</span> | 
+                <span style="color: #00ff00;">� Buy Volume</span> | 
+                <span style="color: #ff0000;">� Sell Volume</span> | 
+                <span style="color: #808080;">⬜ Unknown Volume</span>
+            `;
+            
+            controls.appendChild(info);
+            controls.appendChild(legend);
+            chartContainer.appendChild(controls);
+            
+            // Insert chart after ISIN container
+            targetContainer.insertAdjacentElement('afterend', chartContainer);
+            
+            this.chartDiv = chartDiv;
+            console.log('📊 Chart container created for LightweightCharts');
+        }
+        
+        initializeChart() {
+            if (!this.isLibraryLoaded || !this.chartDiv) {
+                console.log('⚠️ LightweightCharts library or chart div not ready');
+                return;
+            }
+            
+            // Check if LightweightCharts is available
+            if (typeof LightweightCharts === 'undefined') {
+                console.error('❌ LightweightCharts library not available');
+                return;
+            }
+            
+            try {
+                // Create the chart
+                this.chart = LightweightCharts.createChart(this.chartDiv, {
+                    width: this.chartDiv.offsetWidth,
+                    height: 400,
+                    layout: {
+                        backgroundColor: '#ffffff',
+                        textColor: '#333333',
+                        fontSize: 12,
+                    },
+                    grid: {
+                        vertLines: {
+                            color: 'transparent',
+                            visible: false,
+                        },
+                        horzLines: {
+                            color: 'transparent', 
+                            visible: false,
+                        },
+                    },
+                    crosshair: {
+                        mode: LightweightCharts.CrosshairMode.Normal,
+                    },
+                    rightPriceScale: {
+                        borderColor: '#dddddd',
+                        textColor: '#333333',
+                    },
+                    leftPriceScale: {
+                        borderColor: '#dddddd',
+                        textColor: '#333333',
+                    },
+                    timeScale: {
+                        borderColor: '#dddddd',
+                        timeVisible: true,
+                        secondsVisible: false,
+                        textColor: '#333333',
+                    },
+                });
+                
+                // Add line series for price data (main chart)
+                this.lineSeries = this.chart.addLineSeries({
+                    color: '#ff00ff',
+                    lineWidth: 2,
+                    priceFormat: {
+                        type: 'price',
+                        precision: 2,
+                        minMove: 0.01,
+                    },
+                });
+                
+                // Add histogram series for trade volume bars (bottom of chart)
+                this.volumeSeries = this.chart.addHistogramSeries({
+                    color: '#26a69a',
+                    priceFormat: {
+                        type: 'volume',
+                    },
+                    priceScaleId: 'volume',
+                    scaleMargins: {
+                        top: 0.7, // Volume bars take bottom 30% of chart
+                        bottom: 0,
+                    },
+                    base: 0, // Bars start from zero
+                });
+                
+                // Handle window resize
+                const resizeObserver = new ResizeObserver(entries => {
+                    if (this.chart && this.chartDiv) {
+                        this.chart.applyOptions({
+                            width: this.chartDiv.offsetWidth,
+                        });
+                    }
+                });
+                resizeObserver.observe(this.chartDiv);
+                
+                console.log('📊 LightweightCharts initialized successfully with volume bars');
+            } catch (error) {
+                console.error('❌ Error initializing LightweightCharts:', error);
+                console.error('❌ Available methods on LightweightCharts:', Object.keys(LightweightCharts || {}));
+            }
+        }
+        
+        addPriceData(price, timestamp) {
+            if (!this.chart || !this.lineSeries) {
+                console.log('⚠️ Chart not initialized, skipping price data');
+                return;
+            }
+            
+            // Convert timestamp to LightweightCharts time format (Unix timestamp in seconds)
+            const time = Math.floor(timestamp / 1000);
+            
+            const dataPoint = {
+                time: time,
+                value: parseFloat(price)
+            };
+            
+            // Add to our data array
+            this.priceData.push(dataPoint);
+            
+            // Keep only last hour of data (3600 seconds)
+            const cutoffTime = Math.floor(Date.now() / 1000) - 3600;
+            this.priceData = this.priceData.filter(d => d.time > cutoffTime);
+            
+            // Sort by time and remove duplicates
+            this.priceData.sort((a, b) => a.time - b.time);
+            const uniqueData = this.priceData.filter((item, index, arr) => 
+                index === 0 || item.time !== arr[index - 1].time
+            );
+            
+            // Update the chart
+            this.lineSeries.setData(uniqueData);
+            
+            console.log(`📊 Price data updated: €${price} at ${new Date(timestamp).toLocaleTimeString()}`);
+        }
+        
+        addTradeData(price, size, side, timestamp) {
+            if (!this.chart || !this.volumeSeries) {
+                console.log('⚠️ Chart not initialized, skipping trade data');
+                return;
+            }
+            
+            // Convert timestamp to LightweightCharts time format
+            const time = Math.floor(timestamp / 1000);
+            
+            // Determine bar color based on trade side
+            let color = '#808080'; // N/A (gray)
+            
+            if (side === 'buy') {
+                color = '#00ff00'; // Buy (green)
+            } else if (side === 'sell') {
+                color = '#ff0000'; // Sell (red)
+            }
+            
+            // Calculate the height based on price range (use price as the height reference)
+            // Get the visible price range from current price data
+            let maxPrice = Math.max(...this.priceData.map(d => d.value));
+            let minPrice = Math.min(...this.priceData.map(d => d.value));
+            
+            // If no price data yet, use the current trade price as reference
+            if (this.priceData.length === 0) {
+                maxPrice = parseFloat(price) * 1.05;
+                minPrice = parseFloat(price) * 0.95;
+            }
+            
+            // Calculate price range for scaling
+            const priceRange = maxPrice - minPrice;
+            const priceRangePercent = priceRange * 0.3; // Use 30% of price range for max bar height
+            
+            // Normalize trade size to price range (larger trades = taller bars)
+            // Scale trade size relative to a reasonable maximum (e.g., 1000 shares)
+            const normalizedSize = Math.min(parseFloat(size) / 1000, 1); // Cap at 1000 shares
+            const barHeight = minPrice + (priceRangePercent * normalizedSize);
+            
+            // Create volume bar data point with price-relative height
+            const volumePoint = {
+                time: time,
+                value: barHeight, // Height relative to price range
+                color: color
+            };
+            
+            // Add to volume data array
+            this.volumeData.push(volumePoint);
+            
+            // Keep only last hour of volume data
+            const cutoffTime = Math.floor(Date.now() / 1000) - 3600;
+            this.volumeData = this.volumeData.filter(v => v.time > cutoffTime);
+            
+            // Sort volume data by time
+            this.volumeData.sort((a, b) => a.time - b.time);
+            
+            // Update volume series with all data
+            this.volumeSeries.setData(this.volumeData);
+            
+            console.log(`📊 Volume bar added: ${side} ${size} shares at €${price} (height: ${barHeight.toFixed(2)}, ${new Date(timestamp).toLocaleTimeString()})`);
+        }
+        
+        destroy() {
+            if (this.chart) {
+                this.chart.remove();
+                this.chart = null;
+                this.lineSeries = null;
+                this.volumeSeries = null;
+            }
+            
+            const container = document.getElementById(this.containerId);
+            if (container) {
+                container.remove();
+            }
+            
+            console.log('📊 Chart destroyed');
         }
     }
     
@@ -240,6 +626,17 @@
                 if (status.includes('CONNECTED') && (status.includes('STREAMING') || status.includes('POLLING'))) {
                     console.log('🎉 Connected! Setting up our subscriptions...');
                     initializeLightstreamerSubscriptions(client, instrumentInfo);
+                    
+                    // Initialize real-time chart ONLY for the current page's instrument
+                    if (instrumentInfo.currentPageInstrument && !realtimeChart) {
+                        const chartId = `realtime-chart-${instrumentInfo.currentPageInstrument.isin}`;
+                        realtimeChart = new RealtimeChart(chartId, instrumentInfo.currentPageInstrument);
+                        console.log('📊 Real-time chart initialized for current page:', instrumentInfo.currentPageInstrument.name);
+                    } else if (realtimeChart) {
+                        console.log('📊 Real-time chart already exists, skipping creation');
+                    } else {
+                        console.log('📊 No chart created - current page instrument not in watchlist');
+                    }
                 } else if (status === 'DISCONNECTED') {
                     console.log('🔄 Client disconnected, will retry...');
                     setTimeout(checkConnection, 2000);
@@ -269,6 +666,10 @@
                     throw new Error('Watchlist data is empty - no instruments configured');
                 }
                 
+                // Get current page's ISIN to filter instruments
+                const currentPageIsin = getCurrentPageIsin();
+                console.log('🔍 Current page ISIN:', currentPageIsin);
+                
                 // Convert watchlist to array of instrument info for subscriptions
                 const instruments = Object.entries(watchlistData).map(([wkn, instrument]) => ({
                     id: instrument.id,
@@ -278,10 +679,26 @@
                     isin: instrument.isin
                 }));
                 
+                // Find the current page's instrument for chart display
+                let currentPageInstrument = null;
+                if (currentPageIsin) {
+                    currentPageInstrument = instruments.find(inst => inst.isin === currentPageIsin);
+                    if (currentPageInstrument) {
+                        console.log('📊 Found current page instrument:', currentPageInstrument.name);
+                    } else {
+                        console.log('⚠️ Current page ISIN not found in watchlist - chart will not be displayed');
+                    }
+                }
+                
                 console.log(`📊 Found ${instruments.length} instruments in watchlist:`, 
                     instruments.map(i => `${i.name} (${i.wkn})`));
                 
-                return { instruments, isWatchlist: true };
+                return { 
+                    instruments, 
+                    currentPageInstrument,
+                    currentPageIsin,
+                    isWatchlist: true 
+                };
             } catch (e) {
                 throw new Error(`Failed to parse watchlist data from DOM element: ${e.message}`);
             }
@@ -289,6 +706,21 @@
 
         // If no watchlist data element found, throw an exception
         throw new Error('No instrument data found - content script must provide ls-watchlist-data element. Please ensure the extension is properly configured with instruments.');
+    }
+    
+    function getCurrentPageIsin() {
+        // Look for ISIN in .informerhead elements only
+        const informerHeads = document.querySelectorAll('.informerhead');
+        for (const element of informerHeads) {
+            const text = element.textContent;
+            const isinMatch = text.match(/ISIN[:\s]*([A-Z]{2}[A-Z0-9]{10})/i);
+            if (isinMatch) {
+                return isinMatch[1].toUpperCase();
+            }
+        }
+        
+        console.log('⚠️ Could not find ISIN in .informerhead elements - chart will not be injected');
+        return null;
     }
     
     function initializeLightstreamerSubscriptions(client, instrumentInfo) {
