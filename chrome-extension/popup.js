@@ -5,8 +5,35 @@ class PopupController {
         this.events = [];
         this.tabStatus = {};
         this.alertControls = {};
+        this.connectionStatus = 'connecting'; // connecting, connected, disconnected
         
         this.init();
+    }
+
+    updateConnectionStatus(status, text = null) {
+        this.connectionStatus = status;
+        const statusElement = document.getElementById('connectionStatus');
+        if (statusElement) {
+            statusElement.className = `connection-status ${status}`;
+            
+            const indicator = statusElement.querySelector('.status-indicator');
+            const textElement = statusElement.querySelector('.status-text');
+            
+            switch (status) {
+                case 'connected':
+                    if (indicator) indicator.textContent = '🟢';
+                    if (textElement) textElement.textContent = text || 'Connected';
+                    break;
+                case 'connecting':
+                    if (indicator) indicator.textContent = '🟡';
+                    if (textElement) textElement.textContent = text || 'Connecting...';
+                    break;
+                case 'disconnected':
+                    if (indicator) indicator.textContent = '🔴';
+                    if (textElement) textElement.textContent = text || 'Disconnected';
+                    break;
+            }
+        }
     }
 
     async init() {
@@ -28,7 +55,7 @@ class PopupController {
         });
 
         document.getElementById('refreshBtn').addEventListener('click', () => {
-            this.refreshData();
+            this.forceRefresh();
         });
 
         document.getElementById('clearEventsBtn').addEventListener('click', () => {
@@ -65,6 +92,36 @@ class PopupController {
         }, 1000);
     }
 
+    async forceRefresh() {
+        console.log('🔄 Force refresh requested - resetting connection status...');
+        
+        const refreshBtn = document.getElementById('refreshBtn');
+        refreshBtn.style.animation = 'spin 1s linear';
+        refreshBtn.disabled = true;
+        
+        // Reset connection status
+        this.updateConnectionStatus('connecting', 'Force refreshing...');
+        
+        try {
+            // Clear any cached state
+            this.events = [];
+            this.tabStatus = {};
+            this.alertControls = {};
+            
+            // Force reload everything
+            await this.loadData();
+            console.log('✅ Force refresh completed successfully');
+        } catch (error) {
+            console.error('❌ Force refresh failed:', error);
+            this.updateConnectionStatus('disconnected', 'Refresh failed');
+        } finally {
+            refreshBtn.disabled = false;
+            setTimeout(() => {
+                refreshBtn.style.animation = '';
+            }, 1000);
+        }
+    }
+
     render() {
         this.renderTabStatus();
         this.renderAlertControls();
@@ -81,32 +138,13 @@ class PopupController {
         }
 
         // Separate summary from instrument data
-        const summary = this.tabStatus._summary;
+        const debug = this.tabStatus._debug;
         const instruments = Object.fromEntries(
             Object.entries(this.tabStatus).filter(([key]) => !key.startsWith('_'))
         );
 
         let html = '';
         
-        // Show summary information if available
-        if (summary) {
-            html += `
-                <div class="tab-summary">
-                    <div class="summary-item">
-                        <span class="label">Primary Tab:</span>
-                        <span class="value">${summary.primaryTabId ? `#${summary.primaryTabId}` : 'None'}</span>
-                    </div>
-                    <div class="summary-item">
-                        <span class="label">Secondary Tabs:</span>
-                        <span class="value">${summary.secondaryTabCount || 0}</span>
-                    </div>
-                    <div class="summary-item">
-                        <span class="label">Total LS Tabs:</span>
-                        <span class="value">${summary.totalLsTabs || 0}</span>
-                    </div>
-                </div>
-            `;
-        }
 
         // Show instrument status
         html += Object.entries(instruments).map(([wkn, status]) => {
@@ -115,12 +153,21 @@ class PopupController {
             const roleIcon = this.getRoleIcon(status.role);
             const roleText = status.role ? ` (${status.role})` : '';
             
+            // Format latest quote if available
+            let quoteHtml = '';
+            if (status.latestQuote) {
+                const quote = status.latestQuote;
+                const timeStr = new Date(quote.timestamp).toLocaleTimeString();
+                const priceFormatted = quote.price ? `€${parseFloat(quote.price).toFixed(4)}` : 'N/A';
+                quoteHtml = `<div class="latest-quote">Latest: ${priceFormatted} (${timeStr})</div>`;
+            }
+            
             return `
                 <div class="status-item ${statusClass}">
                     <div class="status-info">
                         <span class="instrument-name">${status.name}</span>
                         <span class="wkn">WKN: ${wkn}</span>
-                        ${status.tabId ? `<span class="tab-id">Tab: #${status.tabId}</span>` : ''}
+                        ${quoteHtml}
                     </div>
                     <div class="status-indicator">
                         ${roleIcon}${statusIcon}
@@ -286,7 +333,7 @@ class PopupController {
 
     async toggleAlerts(wkn, enabled) {
         try {
-            await chrome.runtime.sendMessage({
+            await this.sendMessageWithRetry({
                 type: 'TOGGLE_ALERTS',
                 wkn: wkn,
                 enabled: enabled
@@ -323,26 +370,85 @@ class PopupController {
         }
     }
 
+    async checkBackgroundHealth() {
+        try {
+            this.updateConnectionStatus('connecting', 'Checking...');
+            const response = await chrome.runtime.sendMessage({ type: 'HEALTH_CHECK' });
+            const isHealthy = response && response.status === 'ok';
+            
+            if (isHealthy) {
+                this.updateConnectionStatus('connected', 'Connected');
+            } else {
+                this.updateConnectionStatus('disconnected', 'No response');
+            }
+            
+            return isHealthy;
+        } catch (error) {
+            console.warn('🏥 Background script health check failed:', error.message);
+            this.updateConnectionStatus('disconnected', 'Failed');
+            return false;
+        }
+    }
+
+    async sendMessageWithRetry(message, maxRetries = 3, delay = 500) {
+        // First, check if the background script is responsive
+        if (message.type !== 'HEALTH_CHECK') {
+            const isHealthy = await this.checkBackgroundHealth();
+            if (!isHealthy) {
+                console.warn('⚠️ Background script appears unresponsive, attempting message anyway...');
+            }
+        }
+
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                this.updateConnectionStatus('connecting', `Attempt ${attempt}/${maxRetries}...`);
+                console.log(`🔄 Sending message (attempt ${attempt}/${maxRetries}):`, message);
+                const response = await chrome.runtime.sendMessage(message);
+                console.log('✅ Message sent successfully:', response);
+                
+                // Update connection status on success
+                this.updateConnectionStatus('connected', 'Connected');
+                return response;
+            } catch (error) {
+                console.warn(`⚠️ Message attempt ${attempt} failed:`, error.message);
+                
+                if (attempt === maxRetries) {
+                    console.error('❌ All message attempts failed');
+                    this.updateConnectionStatus('disconnected', 'Failed');
+                    throw new Error(`Background script unreachable after ${maxRetries} attempts: ${error.message}`);
+                }
+                
+                // Update status for retry
+                this.updateConnectionStatus('connecting', `Retrying... (${attempt + 1}/${maxRetries})`);
+                
+                // Wait before retrying
+                await new Promise(resolve => setTimeout(resolve, delay));
+                delay *= 2; // Exponential backoff
+            }
+        }
+    }
+
     async loadData() {
         try {
             console.log('🔄 Loading popup data...');
+            this.updateConnectionStatus('connecting', 'Loading data...');
             
-            // Load recent events
+            // Load recent trades and quotes
             console.log('📋 Requesting recent events...');
-            const eventsResponse = await chrome.runtime.sendMessage({ type: 'GET_RECENT_EVENTS' });
+            const eventsResponse = await this.sendMessageWithRetry({ type: 'GET_RECENT_EVENTS' });
             console.log('📋 Events response:', eventsResponse);
             
-            if (eventsResponse?.events) {
-                this.events = eventsResponse.events;
-                console.log(`📋 Loaded ${this.events.length} events`);
+            if (eventsResponse?.trades) {
+                this.events = eventsResponse.trades; // Only trades for recent events
+                console.log(`📋 Loaded ${this.events.length} trade events`);
             } else {
-                console.warn('⚠️ No events in response or invalid response');
+                console.warn('⚠️ No trades in response or invalid response');
                 this.events = [];
             }
 
             // Load tab status
             console.log('📊 Requesting tab status...');
-            const statusResponse = await chrome.runtime.sendMessage({ type: 'GET_TAB_STATUS' });
+            const statusResponse = await this.sendMessageWithRetry({ type: 'GET_TAB_STATUS' });
             console.log('📊 Status response:', statusResponse);
             
             if (statusResponse?.error) {
@@ -350,7 +456,7 @@ class PopupController {
                 this.tabStatus = {};
             } else if (statusResponse?.status) {
                 this.tabStatus = statusResponse.status;
-                console.log('📊 Tab status loaded:', this.tabStatus);
+                console.log(`📊 Loaded tab status with ${Object.keys(this.tabStatus).length} entries`);
             } else {
                 console.warn('⚠️ No status in response or invalid response');
                 this.tabStatus = {};
@@ -361,26 +467,101 @@ class PopupController {
             await this.loadAlertControls();
 
             console.log('✅ All data loaded successfully');
+            this.updateConnectionStatus('connected', 'Ready');
             this.render();
         } catch (error) {
             console.error('❌ Failed to load data:', error);
+            this.updateConnectionStatus('disconnected', 'Error');
             this.showError(`Failed to load data: ${error.message}`);
+            
+            // Show minimal UI even when background script is unreachable
+            this.renderFallbackUI();
         }
     }
 
+    renderFallbackUI() {
+        console.log('🎨 Rendering fallback UI due to connection failure...');
+        
+        // Show empty states for all sections
+        const tabStatusElement = document.getElementById('tabStatus');
+        if (tabStatusElement) {
+            tabStatusElement.innerHTML = `
+                <div class="error-state">
+                    <div class="error-icon">📡</div>
+                    <div class="error-message">Background script unreachable</div>
+                    <div class="error-hint">Try reloading the extension</div>
+                </div>
+            `;
+        }
+        
+        const alertControlsElement = document.getElementById('alertControls');
+        if (alertControlsElement) {
+            alertControlsElement.innerHTML = `
+                <div class="error-state">
+                    <div class="error-message">Alert controls unavailable</div>
+                </div>
+            `;
+        }
+        
+        const eventsListElement = document.getElementById('eventsList');
+        if (eventsListElement) {
+            eventsListElement.innerHTML = `
+                <div class="error-state">
+                    <div class="error-message">Event history unavailable</div>
+                </div>
+            `;
+        }
+        
+        this.renderFooter();
+    }
+
     showError(message) {
-        // Simple error display - could be enhanced with a notification system
-        console.error(message);
+        console.error('💢 Showing error:', message);
+        
+        // Remove any existing error messages
+        const existingErrors = document.querySelectorAll('.error-message');
+        existingErrors.forEach(error => error.remove());
         
         const errorDiv = document.createElement('div');
         errorDiv.className = 'error-message';
-        errorDiv.textContent = message;
+        errorDiv.style.cssText = `
+            background-color: #fee;
+            border: 1px solid #fcc;
+            border-radius: 4px;
+            padding: 8px;
+            margin: 8px 0;
+            color: #c33;
+            font-size: 12px;
+            line-height: 1.4;
+        `;
+        
+        // Show connection-specific error messages
+        if (message.includes('Receiving end does not exist')) {
+            errorDiv.innerHTML = `
+                <strong>🔗 Connection Error</strong><br>
+                The background script is not responding. This can happen when:<br>
+                • The extension was recently updated or reloaded<br>
+                • Chrome is managing extension resources<br>
+                <br>
+                Try: Close and reopen this popup, or reload the extension.
+            `;
+        } else if (message.includes('unreachable')) {
+            errorDiv.innerHTML = `
+                <strong>📡 Background Script Unreachable</strong><br>
+                Unable to communicate with the extension background process.<br>
+                Please reload the extension or restart Chrome.
+            `;
+        } else {
+            errorDiv.textContent = message;
+        }
         
         document.body.insertBefore(errorDiv, document.body.firstChild);
         
+        // Auto-remove after longer time for connection errors
+        const timeout = message.includes('Connection') || message.includes('unreachable') ? 8000 : 3000;
         setTimeout(() => {
             errorDiv.remove();
-        }, 3000);
+        }, timeout);
     }
 }
 

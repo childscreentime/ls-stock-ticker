@@ -60,6 +60,9 @@ class LSContentScript {
             if (event.data.type === 'LS_TICKER_SECONDARY_REGISTER') {
                 console.log('📱 Secondary tab requesting registration with instrument:', event.data.instrumentInfo);
                 this.registerSecondaryTab(event.data.instrumentInfo);
+            } else if (event.data.type === 'LS_TICKER_PRIMARY_REGISTER') {
+                console.log('👑 Primary tab requesting registration with instrument:', event.data.instrumentInfo);
+                this.registerPrimaryTab(event.data.instrumentInfo);
             }
         });
         
@@ -287,7 +290,7 @@ class LSContentScript {
                             console.log('⚠️ Extension context invalidated or background script unavailable');
                             console.log('💡 Please reload the page after extension updates');
                         } else {
-                            console.error('❌ Failed to send event to background:', chrome.runtime.lastError);
+                            console.error('❌ Failed to send event to background:', chrome.runtime.lastError.message || chrome.runtime.lastError);
                         }
                     } else {
                         console.log('✅ Event sent to background script');
@@ -295,7 +298,7 @@ class LSContentScript {
                     resolve();
                 });
             } catch (error) {
-                console.error('❌ Failed to send event to background:', error);
+                console.error('❌ Failed to send event to background:', error.message || error);
                 resolve();
             }
         });
@@ -311,7 +314,7 @@ class LSContentScript {
                     instrumentInfo: instrumentInfo
                 }, (response) => {
                     if (chrome.runtime.lastError) {
-                        console.error('❌ Failed to register secondary tab:', chrome.runtime.lastError);
+                        console.error('❌ Failed to register secondary tab:', chrome.runtime.lastError.message || chrome.runtime.lastError);
                         reject(chrome.runtime.lastError);
                         return;
                     }
@@ -326,7 +329,38 @@ class LSContentScript {
                     resolve(response);
                 });
             } catch (error) {
-                console.error('❌ Failed to register secondary tab:', error);
+                console.error('❌ Error registering secondary tab:', error.message || error);
+                reject(error);
+            }
+        });
+    }
+
+    async registerPrimaryTab(instrumentInfo) {
+        return new Promise((resolve, reject) => {
+            try {
+                console.log('👑 Registering primary tab with background script...');
+                
+                chrome.runtime.sendMessage({
+                    action: 'registerPrimaryTab',
+                    instrumentInfo: instrumentInfo
+                }, (response) => {
+                    if (chrome.runtime.lastError) {
+                        console.error('❌ Failed to register primary tab:', chrome.runtime.lastError.message || chrome.runtime.lastError);
+                        reject(chrome.runtime.lastError);
+                        return;
+                    }
+                    
+                    if (!response) {
+                        console.warn('⚠️ Received undefined response from background script');
+                        resolve({ status: 'unknown' });
+                        return;
+                    }
+                    
+                    console.log('✅ Primary tab registered successfully:', response);
+                    resolve(response);
+                });
+            } catch (error) {
+                console.error('❌ Error registering primary tab:', error.message || error);
                 reject(error);
             }
         });

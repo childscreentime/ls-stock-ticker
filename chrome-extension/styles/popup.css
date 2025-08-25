@@ -21,14 +21,49 @@ body {
     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
     color: white;
     padding: 16px;
+}
+
+.header-info {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    width: 100%;
 }
 
 .header h1 {
     font-size: 18px;
     font-weight: 600;
+    margin: 0;
+}
+
+.connection-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    opacity: 0.9;
+}
+
+.connection-status .status-indicator {
+    font-size: 14px;
+}
+
+.connection-status.connected .status-indicator {
+    color: #4CAF50;
+}
+
+.connection-status.connecting .status-indicator {
+    color: #FFC107;
+    animation: pulse 2s infinite;
+}
+
+.connection-status.disconnected .status-indicator {
+    color: #F44336;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
 }
 
 .header-actions {
@@ -137,6 +172,18 @@ body {
 
 .status-info .wkn {
     font-size: 12px;
+    color: #6c757d;
+}
+
+.status-info .latest-quote {
+    font-size: 11px;
+    color: #007bff;
+    font-weight: 500;
+    margin-top: 2px;
+}
+
+.status-info .tab-id {
+    font-size: 11px;
     color: #6c757d;
 }
 
@@ -291,13 +338,33 @@ input:checked + .slider:before {
     color: #6c757d;
 }
 
-/* Loading and Empty States */
-.loading,
-.empty {
+/* Loading States */
+.loading {
     text-align: center;
     padding: 20px;
-    color: #6c757d;
+    color: #666;
     font-style: italic;
+}
+
+.error-state {
+    text-align: center;
+    padding: 20px;
+    color: #666;
+}
+
+.error-state .error-icon {
+    font-size: 24px;
+    margin-bottom: 8px;
+}
+
+.error-state .error-message {
+    font-weight: 500;
+    margin-bottom: 4px;
+}
+
+.error-state .error-hint {
+    font-size: 12px;
+    color: #999;
 }
 
 /* Error Messages */
@@ -310,13 +377,65 @@ input:checked + .slider:before {
     font-size: 13px;
 }
 
-/* Tab Summary */
+/* Tab Status Grid */
+.status-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.debug-section {
+    background: #f0f8ff;
+    border: 1px solid #cde;
+    border-radius: 4px;
+    margin-bottom: 12px;
+    padding: 8px;
+    font-size: 12px;
+}
+
+.debug-section summary {
+    cursor: pointer;
+    font-weight: 500;
+    padding: 4px;
+}
+
+.debug-content {
+    margin-top: 8px;
+    padding: 8px;
+    background: white;
+    border-radius: 3px;
+}
+
+.debug-item {
+    margin-bottom: 8px;
+}
+
+.debug-item:last-child {
+    margin-bottom: 0;
+}
+
+.debug-item strong {
+    display: block;
+    margin-bottom: 4px;
+    color: #333;
+}
+
+.debug-item div {
+    padding: 2px 0;
+    font-family: monospace;
+    font-size: 11px;
+    color: #666;
+}
+
 .tab-summary {
-    background: #e3f2fd;
+    background: #f8f9fa;
+    border: 1px solid #e9ecef;
+    border-radius: 6px;
     padding: 12px;
     margin-bottom: 12px;
-    border-radius: 6px;
-    border-left: 3px solid #2196f3;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
 }
 
 .summary-item {

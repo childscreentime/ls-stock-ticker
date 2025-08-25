@@ -865,6 +865,15 @@
             const instrumentInfo = extractInstrumentInfo();
             console.log('📋 Instrument data:', instrumentInfo);
             
+            // Register this tab with background script based on its role
+            if (tabRole === 'primary' && instrumentInfo.currentPageInstrument) {
+                console.log('👑 Registering primary tab with background script:', instrumentInfo.currentPageInstrument);
+                window.postMessage({
+                    type: 'LS_TICKER_PRIMARY_REGISTER',
+                    instrumentInfo: instrumentInfo.currentPageInstrument
+                }, '*');
+            }
+            
             // Always initialize chart for current page instrument (both primary and secondary)
             if (instrumentInfo.currentPageInstrument && !realtimeChart) {
                 const chartId = `realtime-chart-${instrumentInfo.currentPageInstrument.isin}`;

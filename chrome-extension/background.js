@@ -10,8 +10,9 @@ class BackgroundService {
         this.config = new StockConfig();
         this.alertManager = new AlertManager();
         this.webhookManager = new WebhookManager();
-        this.recentEvents = []; // Store last 100 events for popup
-        this.maxEvents = 100;
+        this.recentTrades = []; // Store last 20 trade events for popup
+        this.latestQuotes = new Map(); // Store latest quote for each WKN
+        this.maxTrades = 20;
         
         // Primary/Secondary tab management
         this.primaryTabId = null; // The tab that maintains LightStream connection
@@ -184,7 +185,7 @@ class BackgroundService {
                 return true; // Keep channel open
                 
             } else if (message.type === 'GET_RECENT_EVENTS') {
-                sendResponse({ events: this.recentEvents.slice(-50) });
+                sendResponse({ trades: this.recentTrades, quotes: Object.fromEntries(this.latestQuotes) });
                 
             } else if (message.type === 'TOGGLE_ALERTS') {
                 this.toggleAlerts(message.wkn, message.enabled)
@@ -242,6 +243,15 @@ class BackgroundService {
                     });
                 return true; // Keep channel open
                 
+            } else if (message.action === 'registerPrimaryTab') {
+                this.registerPrimaryTab(sender.tab.id, message.instrumentInfo)
+                    .then(() => sendResponse({ status: 'registered' }))
+                    .catch(error => {
+                        console.error('❌ Error registering primary tab:', error);
+                        sendResponse({ error: error.message });
+                    });
+                return true; // Keep channel open
+                
             } else if (message.action === 'checkOtherLsTcTabs') {
                 this.checkOtherLsTcTabs(message.currentUrl)
                     .then(result => sendResponse(result))
@@ -250,6 +260,9 @@ class BackgroundService {
                         sendResponse({ error: error.message });
                     });
                 return true; // Keep channel open
+                
+            } else if (message.type === 'HEALTH_CHECK') {
+                sendResponse({ status: 'ok', timestamp: Date.now() });
                 
             } else {
                 console.warn('⚠️ Unknown message type/action:', message);
@@ -362,7 +375,7 @@ class BackgroundService {
         console.log('📊 Event type:', eventType);
         console.log('📊 Event data:', eventData);
         
-        // Add to recent events for popup
+        // Handle trades and quotes separately
         const eventWithTimestamp = {
             ...eventData,
             type: eventType,
@@ -370,9 +383,17 @@ class BackgroundService {
             tabId: tab?.id
         };
         
-        this.recentEvents.push(eventWithTimestamp);
-        if (this.recentEvents.length > this.maxEvents) {
-            this.recentEvents.shift();
+        if (eventType === 'TRADE') {
+            // Store trades in recent trades list
+            this.recentTrades.push(eventWithTimestamp);
+            if (this.recentTrades.length > this.maxTrades) {
+                this.recentTrades.shift();
+            }
+            console.log(`📈 Trade event stored (${this.recentTrades.length}/${this.maxTrades})`);
+        } else if (eventType === 'QUOTE' && eventData.wkn) {
+            // Store latest quote for each instrument
+            this.latestQuotes.set(eventData.wkn, eventWithTimestamp);
+            console.log(`💰 Quote updated for WKN ${eventData.wkn}: ${eventData.price}`);
         }
 
         // Check alert rules using the actual event data
@@ -472,7 +493,8 @@ class BackgroundService {
                 tabId: matchingTabId,
                 status: tabStatus,
                 role: tabRole, // 'primary', 'secondary', or null
-                isin: instrument.isin
+                isin: instrument.isin,
+                latestQuote: this.latestQuotes.get(wkn) || null
             };
         }
         
@@ -482,6 +504,23 @@ class BackgroundService {
             secondaryTabCount: this.secondaryTabs.size,
             totalLsTabs: allLsTabs.length,
             watchlistInstruments: Object.keys(watchlist).length
+        };
+        
+        // Add debug information
+        status._debug = {
+            registeredTabs: Array.from(this.lsTcTabs.entries()).map(([tabId, tabInfo]) => ({
+                tabId,
+                role: tabInfo.role,
+                instrumentWkn: tabInfo.instrumentInfo?.wkn,
+                instrumentName: tabInfo.instrumentInfo?.name,
+                timestamp: tabInfo.timestamp
+            })),
+            openLsTabs: allLsTabs.map(tab => ({
+                id: tab.id,
+                url: tab.url,
+                discarded: tab.discarded,
+                status: tab.status
+            }))
         };
         
         console.log('📊 getTabStatus() returning:', status);
@@ -604,6 +643,22 @@ class BackgroundService {
             instrumentInfo 
         });
         console.log(`📱 Secondary tab ${tabId} registered for ${instrumentInfo?.name || 'unknown instrument'}`);
+        await this.persistTabState();
+    }
+
+    async registerPrimaryTab(tabId, instrumentInfo) {
+        // Update the primary tab registration with instrument info
+        if (this.primaryTabId === tabId) {
+            this.lsTcTabs.set(tabId, { 
+                role: 'primary', 
+                timestamp: Date.now(),
+                instrumentInfo 
+            });
+            console.log(`👑 Primary tab ${tabId} registered for ${instrumentInfo?.name || 'unknown instrument'}`);
+            await this.persistTabState();
+        } else {
+            console.log(`⚠️ Tab ${tabId} tried to register as primary, but primary tab is ${this.primaryTabId}`);
+        }
     }
 
     async promotePrimaryTab() {
