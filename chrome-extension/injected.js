@@ -31,6 +31,9 @@
             
             if (price && instrument) {
                 console.log(`📈 Quote update: ${instrument.name} = €${price} at ${timestamp}`);
+                console.log(`🕐 Timestamp type: ${typeof timestamp}, value: ${timestamp}`);
+                console.log(`🕐 Current local time: ${new Date().toISOString()}`);
+                console.log(`🕐 Parsed timestamp: ${new Date(timestamp).toISOString()}`);
                 
                 // Update real-time chart ONLY if this is the current page's instrument
                 if (realtimeChart && realtimeChart.instrumentInfo.isin === instrument.isin) {
@@ -46,6 +49,8 @@
         
         handleTrade(price, size, timestamp, direction, instrument) {
             console.log(`🔥 Trade execution: ${instrument?.name || 'Unknown'} ${direction} ${size} × €${price} at ${timestamp}`);
+            console.log(`🕐 Trade timestamp type: ${typeof timestamp}, value: ${timestamp}`);
+            console.log(`🕐 Trade parsed timestamp: ${new Date(timestamp).toISOString()}`);
             
             // Update real-time chart ONLY if this is the current page's instrument
             if (realtimeChart && instrument && realtimeChart.instrumentInfo.isin === instrument.isin) {
@@ -147,6 +152,7 @@
             this.priceData = []; // Array of {time, value}
             this.volumeData = []; // Array of {time, value, color}
             this.isLibraryLoaded = false;
+            this.tradeTooltipData = new Map(); // Store trade data for tooltips
             
             // Clean up any existing chart with the same ID before creating new one
             this.cleanupExistingChart();
@@ -192,19 +198,21 @@
         }
         
         createChartContainer() {
-            // Find the ISIN container on the page
-            const isinContainers = document.querySelectorAll('.informerhead');
+            // Find the chart container with class "chart"
+            const chartContainers = document.querySelectorAll('.chart');
             let targetContainer = null;
             
-            for (const container of isinContainers) {
-                if (container.textContent.includes('ISIN:')) {
-                    targetContainer = container.parentElement;
+            // Look for a chart container that has a highcharts-container inside it
+            for (const container of chartContainers) {
+                const highchartsContainer = container.querySelector('.highcharts-container');
+                if (highchartsContainer) {
+                    targetContainer = container;
                     break;
                 }
             }
             
             if (!targetContainer) {
-                console.log('⚠️ Could not find ISIN container for chart placement');
+                console.log('⚠️ Could not find chart container with .highcharts-container for chart placement');
                 return;
             }
             
@@ -221,18 +229,6 @@
                 position: relative;
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             `;
-            
-            // Chart title
-            const title = document.createElement('div');
-            title.style.cssText = `
-                color: #333;
-                font-size: 16px;
-                font-weight: 600;
-                margin-bottom: 15px;
-                text-align: center;
-            `;
-            title.textContent = `📈 ${this.instrumentInfo.name} - Real-time Chart`;
-            chartContainer.appendChild(title);
             
             // Chart div
             const chartDiv = document.createElement('div');
@@ -262,8 +258,8 @@
             const legend = document.createElement('span');
             legend.innerHTML = `
                 <span style="color: #00ff88;">📈 Price Line</span> | 
-                <span style="color: #00ff00;">� Buy Volume</span> | 
-                <span style="color: #ff0000;">� Sell Volume</span> | 
+                <span style="color: #00ff00;">🟢 Buy Volume</span> | 
+                <span style="color: #ff0000;">🔴 Sell Volume</span> | 
                 <span style="color: #808080;">⬜ Unknown Volume</span>
             `;
             
@@ -271,11 +267,12 @@
             controls.appendChild(legend);
             chartContainer.appendChild(controls);
             
-            // Insert chart after ISIN container
-            targetContainer.insertAdjacentElement('afterend', chartContainer);
+            // Insert chart after the .highcharts-container div
+            const highchartsContainer = targetContainer.querySelector('.highcharts-container');
+            highchartsContainer.insertAdjacentElement('afterend', chartContainer);
             
             this.chartDiv = chartDiv;
-            console.log('📊 Chart container created for LightweightCharts');
+            console.log('📊 Chart container created for LightweightCharts inside existing chart div');
         }
         
         initializeChart() {
@@ -324,7 +321,7 @@
                     timeScale: {
                         borderColor: '#dddddd',
                         timeVisible: true,
-                        secondsVisible: false,
+                        secondsVisible: true,
                         textColor: '#333333',
                     },
                 });
@@ -345,13 +342,26 @@
                     color: '#26a69a',
                     priceFormat: {
                         type: 'volume',
+                        precision: 0,
+                        minMove: 1,
                     },
                     priceScaleId: 'volume',
                     scaleMargins: {
-                        top: 0.7, // Volume bars take bottom 30% of chart
+                        top: 0.8, // Volume bars take bottom 20% of chart
                         bottom: 0,
                     },
                     base: 0, // Bars start from zero
+                });
+                
+                // Configure volume price scale to show actual trade sizes
+                this.chart.priceScale('volume').applyOptions({
+                    scaleMargins: {
+                        top: 0.8,
+                        bottom: 0,
+                    },
+                    // Ensure the right price scale shows actual trade sizes, not normalized values
+                    visible: true,
+                    alignLabels: true,
                 });
                 
                 // Handle window resize
@@ -363,6 +373,9 @@
                     }
                 });
                 resizeObserver.observe(this.chartDiv);
+                
+                // Add tooltip functionality
+                this.addLegendOverlay();
                 
                 console.log('📊 LightweightCharts initialized successfully with volume bars');
             } catch (error) {
@@ -377,8 +390,37 @@
                 return;
             }
             
-            // Convert timestamp to LightweightCharts time format (Unix timestamp in seconds)
-            const time = Math.floor(timestamp / 1000);
+            // Convert timestamp to LightweightCharts format
+            // LightweightCharts interprets all timestamps as UTC and displays them in local timezone
+            // So we need to adjust our local timestamps to display correctly
+            let time;
+            let originalDate;
+            
+            if (typeof timestamp === 'string') {
+                originalDate = new Date(timestamp);
+            } else if (typeof timestamp === 'number') {
+                // If timestamp is already a number, check if it's in milliseconds or seconds
+                if (timestamp > 1e10) {
+                    originalDate = new Date(timestamp);
+                } else {
+                    originalDate = new Date(timestamp * 1000);
+                }
+            } else {
+                originalDate = new Date();
+            }
+            
+            // For LightweightCharts: subtract timezone offset so it displays correctly in local time
+            const timezoneOffsetMs = originalDate.getTimezoneOffset() * 60 * 1000;
+            const adjustedTimestamp = originalDate.getTime() - timezoneOffsetMs;
+            time = Math.floor(adjustedTimestamp / 1000);
+            
+            console.log(`🕐 Price timestamp conversion:`);
+            console.log(`  Input: ${timestamp}`);
+            console.log(`  Original Date: ${originalDate.toISOString()}`);
+            console.log(`  Timezone Offset: ${originalDate.getTimezoneOffset()} minutes`);
+            console.log(`  Adjusted Timestamp: ${adjustedTimestamp}`);
+            console.log(`  Chart Time: ${time}`);
+            console.log(`  Will Display As: ${new Date(time * 1000).toUTCString()}`);
             
             const dataPoint = {
                 time: time,
@@ -389,7 +431,7 @@
             this.priceData.push(dataPoint);
             
             // Keep only last hour of data (3600 seconds)
-            const cutoffTime = Math.floor(Date.now() / 1000) - 3600;
+            const cutoffTime = Math.floor((Date.now() - timezoneOffsetMs) / 1000) - 3600;
             this.priceData = this.priceData.filter(d => d.time > cutoffTime);
             
             // Sort by time and remove duplicates
@@ -401,7 +443,102 @@
             // Update the chart
             this.lineSeries.setData(uniqueData);
             
-            console.log(`📊 Price data updated: €${price} at ${new Date(timestamp).toLocaleTimeString()}`);
+            console.log(`📊 Price data updated: €${price} at ${originalDate.toLocaleTimeString()}`);
+        }
+        
+        addLegendOverlay() {
+            if (!this.chart || !this.chartDiv) return;
+            
+            // Create legend container
+            const legend = document.createElement('div');
+            legend.style.cssText = `
+                position: absolute;
+                left: 12px;
+                top: 12px;
+                z-index: 1;
+                font-size: 14px;
+                font-family: sans-serif;
+                line-height: 18px;
+                font-weight: 300;
+                pointer-events: none;
+                background: rgba(255, 255, 255, 0.9);
+                padding: 8px 12px;
+                border-radius: 4px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            `;
+            this.chartDiv.appendChild(legend);
+            
+            // Create price row
+            const priceRow = document.createElement('div');
+            priceRow.innerHTML = `${this.instrumentInfo.name} <strong>--</strong>`;
+            priceRow.style.color = '#ff00ff';
+            priceRow.style.fontWeight = '500';
+            legend.appendChild(priceRow);
+            
+            // Create volume row
+            const volumeRow = document.createElement('div');
+            volumeRow.innerHTML = `Volume <strong>--</strong>`;
+            volumeRow.style.color = '#666';
+            volumeRow.style.fontSize = '12px';
+            volumeRow.style.marginTop = '4px';
+            legend.appendChild(volumeRow);
+            
+            // Subscribe to crosshair move events
+            this.chart.subscribeCrosshairMove(param => {
+                if (param.time) {
+                    // Get price data
+                    const priceData = param.seriesData.get(this.lineSeries);
+                    let priceFormatted = '--';
+                    if (priceData && priceData.value !== undefined) {
+                        priceFormatted = `€${priceData.value.toFixed(2)}`;
+                    }
+                    
+                    // Get volume data and trade information
+                    const volumeData = param.seriesData.get(this.volumeSeries);
+                    let volumeFormatted = '--';
+                    let volumeColor = '#666';
+                    
+                    if (volumeData && volumeData.value !== undefined) {
+                        // Look up trade data for this specific time
+                        const tradeData = this.tradeTooltipData.get(param.time);
+                        console.log(`🔍 Legend hover - Time: ${param.time}, Trade data:`, tradeData);
+                        console.log(`🔍 Legend hover - Volume data value: ${volumeData.value}`);
+                        
+                        if (tradeData) {
+                            // Always show actual trade size, not the normalized volume
+                            // Convert the chart time back to local time for display
+                            const chartTimeMs = param.time * 1000;
+                            const localTime = new Date(chartTimeMs + (new Date().getTimezoneOffset() * 60 * 1000));
+                            const timeString = localTime.toLocaleTimeString();
+                            
+                            volumeFormatted = `${tradeData.size.toLocaleString()} @ €${tradeData.price.toFixed(2)} (${timeString})`;
+                            volumeColor = tradeData.side === 'buy' ? '#00ff00' : 
+                                         tradeData.side === 'sell' ? '#ff0000' : '#666';
+                            
+                            const sideText = tradeData.side.toUpperCase();
+                            volumeFormatted = `${sideText} ${volumeFormatted}`;
+                            
+                            // Also update price to show trade price when hovering volume
+                            priceFormatted = `€${tradeData.price.toFixed(2)}`;
+                            
+                            console.log(`✅ Legend showing: ${volumeFormatted} (actual size: ${tradeData.size})`);
+                        } else {
+                            // Show message when no trade data available
+                            volumeFormatted = `No trade data`;
+                            console.log(`❌ No trade data found for time ${param.time}`);
+                            console.log(`❌ Available trade data times:`, Array.from(this.tradeTooltipData.keys()));
+                        }
+                    }
+                    
+                    // Update legend
+                    priceRow.innerHTML = `${this.instrumentInfo.name} <strong>${priceFormatted}</strong>`;
+                    volumeRow.innerHTML = `Volume <strong style="color: ${volumeColor}">${volumeFormatted}</strong>`;
+                } else {
+                    // Reset to default when not hovering
+                    priceRow.innerHTML = `${this.instrumentInfo.name} <strong>--</strong>`;
+                    volumeRow.innerHTML = `Volume <strong>--</strong>`;
+                }
+            });
         }
         
         addTradeData(price, size, side, timestamp) {
@@ -410,8 +547,36 @@
                 return;
             }
             
-            // Convert timestamp to LightweightCharts time format
-            const time = Math.floor(timestamp / 1000);
+            // Convert timestamp to LightweightCharts format
+            // LightweightCharts interprets all timestamps as UTC and displays them in local timezone
+            // So we need to adjust our local timestamps to display correctly
+            let time;
+            let originalDate;
+            
+            if (typeof timestamp === 'string') {
+                originalDate = new Date(timestamp);
+            } else if (typeof timestamp === 'number') {
+                // If timestamp is already a number, check if it's in milliseconds or seconds
+                if (timestamp > 1e10) {
+                    originalDate = new Date(timestamp);
+                } else {
+                    originalDate = new Date(timestamp * 1000);
+                }
+            } else {
+                originalDate = new Date();
+            }
+            
+            // For LightweightCharts: subtract timezone offset so it displays correctly in local time
+            const timezoneOffsetMs = originalDate.getTimezoneOffset() * 60 * 1000;
+            const adjustedTimestamp = originalDate.getTime() - timezoneOffsetMs;
+            time = Math.floor(adjustedTimestamp / 1000);
+            
+            console.log(`🕐 Trade timestamp conversion:`);
+            console.log(`  Input: ${timestamp}`);
+            console.log(`  Original Date: ${originalDate.toISOString()}`);
+            console.log(`  Timezone Offset: ${originalDate.getTimezoneOffset()} minutes`);
+            console.log(`  Adjusted Timestamp: ${adjustedTimestamp}`);
+            console.log(`  Chart Time: ${time}`);
             
             // Determine bar color based on trade side
             let color = '#808080'; // N/A (gray)
@@ -422,39 +587,41 @@
                 color = '#ff0000'; // Sell (red)
             }
             
-            // Calculate the height based on price range (use price as the height reference)
-            // Get the visible price range from current price data
-            let maxPrice = Math.max(...this.priceData.map(d => d.value));
-            let minPrice = Math.min(...this.priceData.map(d => d.value));
+            // Use actual trade size for the chart (no normalization)
+            // The chart should display the real trade volumes
+            const actualSize = parseFloat(size);
             
-            // If no price data yet, use the current trade price as reference
-            if (this.priceData.length === 0) {
-                maxPrice = parseFloat(price) * 1.05;
-                minPrice = parseFloat(price) * 0.95;
-            }
-            
-            // Calculate price range for scaling
-            const priceRange = maxPrice - minPrice;
-            const priceRangePercent = priceRange * 0.3; // Use 30% of price range for max bar height
-            
-            // Normalize trade size to price range (larger trades = taller bars)
-            // Scale trade size relative to a reasonable maximum (e.g., 1000 shares)
-            const normalizedSize = Math.min(parseFloat(size) / 1000, 1); // Cap at 1000 shares
-            const barHeight = minPrice + (priceRangePercent * normalizedSize);
-            
-            // Create volume bar data point with price-relative height
+            // Create volume bar data point with actual trade size
             const volumePoint = {
                 time: time,
-                value: barHeight, // Height relative to price range
+                value: actualSize, // Use actual size, not normalized
                 color: color
             };
+            
+            // Store trade data for tooltip lookup
+            this.tradeTooltipData.set(time, {
+                price: parseFloat(price),
+                size: parseFloat(size),
+                side: side,
+                timestamp: timestamp
+            });
+            
+            console.log(`💾 Storing trade data - Time: ${time}, Size: ${parseFloat(size)}, Price: ${parseFloat(price)}, Side: ${side}`);
+            console.log(`💾 Chart will display actual size: ${actualSize} (no normalization applied)`);
             
             // Add to volume data array
             this.volumeData.push(volumePoint);
             
             // Keep only last hour of volume data
-            const cutoffTime = Math.floor(Date.now() / 1000) - 3600;
+            const cutoffTime = Math.floor((Date.now() - timezoneOffsetMs) / 1000) - 3600;
             this.volumeData = this.volumeData.filter(v => v.time > cutoffTime);
+            
+            // Clean up old tooltip data
+            for (const [time, data] of this.tradeTooltipData) {
+                if (time <= cutoffTime) {
+                    this.tradeTooltipData.delete(time);
+                }
+            }
             
             // Sort volume data by time
             this.volumeData.sort((a, b) => a.time - b.time);
@@ -462,7 +629,7 @@
             // Update volume series with all data
             this.volumeSeries.setData(this.volumeData);
             
-            console.log(`📊 Volume bar added: ${side} ${size} shares at €${price} (height: ${barHeight.toFixed(2)}, ${new Date(timestamp).toLocaleTimeString()})`);
+            console.log(`📊 Volume bar added: ${side} ${size} shares at €${price} (actual size: ${actualSize}, ${originalDate.toLocaleTimeString()})`);
         }
         
         destroy() {
