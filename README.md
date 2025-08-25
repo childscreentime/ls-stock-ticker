@@ -2,6 +2,9 @@
 
 A Chrome extension that monitors multiple stock instruments on Lang & Schwarz (ls-tc.de) in real-time, providing trade alerts and price notifications directly in your browser.
 
+<img width="962" height="641" alt="image" src="https://github.com/user-attachments/assets/e774757a-bb21-4b15-a5d4-bf78a4f7e668" />
+
+
 ## 🚀 Features
 
 - **Multi-Instrument Monitoring**: Track multiple stocks simultaneously (NVIDIA, Rheinmetall, etc.)
