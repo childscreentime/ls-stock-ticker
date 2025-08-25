@@ -36,30 +36,6 @@ class PopupController {
         });
     }
 
-    async loadData() {
-        try {
-            // Load recent events
-            const eventsResponse = await chrome.runtime.sendMessage({ type: 'GET_RECENT_EVENTS' });
-            if (eventsResponse?.events) {
-                this.events = eventsResponse.events;
-            }
-
-            // Load tab status
-            const statusResponse = await chrome.runtime.sendMessage({ type: 'GET_TAB_STATUS' });
-            if (statusResponse?.status) {
-                this.tabStatus = statusResponse.status;
-            }
-
-            // Load alert controls
-            await this.loadAlertControls();
-
-            this.render();
-        } catch (error) {
-            console.error('❌ Failed to load data:', error);
-            this.showError('Failed to load data');
-        }
-    }
-
     async loadAlertControls() {
         try {
             const result = await chrome.storage.local.get(['watchlist', 'alertRules']);
@@ -104,19 +80,51 @@ class PopupController {
             return;
         }
 
-        const html = Object.entries(this.tabStatus).map(([wkn, status]) => {
+        // Separate summary from instrument data
+        const summary = this.tabStatus._summary;
+        const instruments = Object.fromEntries(
+            Object.entries(this.tabStatus).filter(([key]) => !key.startsWith('_'))
+        );
+
+        let html = '';
+        
+        // Show summary information if available
+        if (summary) {
+            html += `
+                <div class="tab-summary">
+                    <div class="summary-item">
+                        <span class="label">Primary Tab:</span>
+                        <span class="value">${summary.primaryTabId ? `#${summary.primaryTabId}` : 'None'}</span>
+                    </div>
+                    <div class="summary-item">
+                        <span class="label">Secondary Tabs:</span>
+                        <span class="value">${summary.secondaryTabCount || 0}</span>
+                    </div>
+                    <div class="summary-item">
+                        <span class="label">Total LS Tabs:</span>
+                        <span class="value">${summary.totalLsTabs || 0}</span>
+                    </div>
+                </div>
+            `;
+        }
+
+        // Show instrument status
+        html += Object.entries(instruments).map(([wkn, status]) => {
             const statusIcon = this.getStatusIcon(status.status);
             const statusClass = `status-${status.status}`;
+            const roleIcon = this.getRoleIcon(status.role);
+            const roleText = status.role ? ` (${status.role})` : '';
             
             return `
                 <div class="status-item ${statusClass}">
                     <div class="status-info">
                         <span class="instrument-name">${status.name}</span>
                         <span class="wkn">WKN: ${wkn}</span>
+                        ${status.tabId ? `<span class="tab-id">Tab: #${status.tabId}</span>` : ''}
                     </div>
                     <div class="status-indicator">
-                        ${statusIcon}
-                        <span class="status-text">${status.status}</span>
+                        ${roleIcon}${statusIcon}
+                        <span class="status-text">${status.status}${roleText}</span>
                     </div>
                 </div>
             `;
@@ -165,11 +173,33 @@ class PopupController {
         }
 
         const html = this.events.slice(-20).reverse().map(event => {
-            const timeStr = new Date(event.timestamp).toLocaleTimeString();
-            const eventData = event.event;
-            
-            let eventHtml = '';
-            if (eventData.kind === 'TRADE') {
+            try {
+                const timeStr = new Date(event.timestamp).toLocaleTimeString();
+                
+                // Handle both old nested structure and new flattened structure
+                const eventData = event.event || event; // Fallback to event itself if no nested .event
+                const eventType = event.type || eventData.kind; // Use .type or fallback to .kind
+                
+                console.log('🔍 Rendering event:', { event, eventData, eventType });
+                
+                // Validate we have minimum required data
+                if (!eventData || (!eventType && !eventData.kind)) {
+                    console.warn('⚠️ Invalid event data:', event);
+                    return `
+                        <div class="event-item error">
+                            <div class="event-header">
+                                <span class="event-type">❌ INVALID EVENT</span>
+                                <span class="event-time">${timeStr}</span>
+                            </div>
+                            <div class="event-details">
+                                <small>Invalid event data structure</small>
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                let eventHtml = '';
+                if (eventType === 'TRADE' || eventData.kind === 'TRADE') {
                 const sideIcon = eventData.side === 'buy' ? '🟢' : eventData.side === 'sell' ? '🔴' : '🟡';
                 eventHtml = `
                     <div class="event-item trade">
@@ -187,7 +217,7 @@ class PopupController {
                         </div>
                     </div>
                 `;
-            } else if (eventData.kind === 'QUOTE') {
+            } else if (eventType === 'QUOTE' || eventData.kind === 'QUOTE') {
                 eventHtml = `
                     <div class="event-item quote">
                         <div class="event-header">
@@ -204,9 +234,37 @@ class PopupController {
                         </div>
                     </div>
                 `;
+            } else {
+                // Unknown event type
+                eventHtml = `
+                    <div class="event-item unknown">
+                        <div class="event-header">
+                            <span class="event-type">❓ UNKNOWN</span>
+                            <span class="event-time">${timeStr}</span>
+                        </div>
+                        <div class="event-details">
+                            <strong>Unknown event type: ${eventType || 'N/A'}</strong><br>
+                            <small>${JSON.stringify(eventData, null, 2)}</small>
+                        </div>
+                    </div>
+                `;
             }
             
             return eventHtml;
+            } catch (error) {
+                console.error('❌ Error rendering event:', error, event);
+                return `
+                    <div class="event-item error">
+                        <div class="event-header">
+                            <span class="event-type">❌ ERROR</span>
+                            <span class="event-time">${new Date().toLocaleTimeString()}</span>
+                        </div>
+                        <div class="event-details">
+                            <small>Error rendering event: ${error.message}</small>
+                        </div>
+                    </div>
+                `;
+            }
         }).join('');
 
         container.innerHTML = html;
@@ -254,6 +312,59 @@ class PopupController {
             case 'discarded': return '🟡';
             case 'missing': return '🔴';
             default: return '⚫';
+        }
+    }
+
+    getRoleIcon(role) {
+        switch (role) {
+            case 'primary': return '👑';
+            case 'secondary': return '📱';
+            default: return '';
+        }
+    }
+
+    async loadData() {
+        try {
+            console.log('🔄 Loading popup data...');
+            
+            // Load recent events
+            console.log('📋 Requesting recent events...');
+            const eventsResponse = await chrome.runtime.sendMessage({ type: 'GET_RECENT_EVENTS' });
+            console.log('📋 Events response:', eventsResponse);
+            
+            if (eventsResponse?.events) {
+                this.events = eventsResponse.events;
+                console.log(`📋 Loaded ${this.events.length} events`);
+            } else {
+                console.warn('⚠️ No events in response or invalid response');
+                this.events = [];
+            }
+
+            // Load tab status
+            console.log('📊 Requesting tab status...');
+            const statusResponse = await chrome.runtime.sendMessage({ type: 'GET_TAB_STATUS' });
+            console.log('📊 Status response:', statusResponse);
+            
+            if (statusResponse?.error) {
+                console.error('❌ Background script error:', statusResponse.error);
+                this.tabStatus = {};
+            } else if (statusResponse?.status) {
+                this.tabStatus = statusResponse.status;
+                console.log('📊 Tab status loaded:', this.tabStatus);
+            } else {
+                console.warn('⚠️ No status in response or invalid response');
+                this.tabStatus = {};
+            }
+
+            // Load alert controls
+            console.log('🔔 Loading alert controls...');
+            await this.loadAlertControls();
+
+            console.log('✅ All data loaded successfully');
+            this.render();
+        } catch (error) {
+            console.error('❌ Failed to load data:', error);
+            this.showError(`Failed to load data: ${error.message}`);
         }
     }
 

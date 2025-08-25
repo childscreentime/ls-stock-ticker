@@ -14,14 +14,14 @@ export class AlertManager {
             return alerts;
         }
 
-        // Trade alerts
-        if (event.event.kind === 'TRADE' && rules.notifications.trades) {
+        // Trade alerts - check for trade events
+        if (event.kind === 'TRADE' && rules.notifications.trades) {
             const tradeAlerts = this.evaluateTradeEvent(event, rules);
             alerts.push(...tradeAlerts);
         }
 
-        // Quote alerts
-        if (event.event.kind === 'QUOTE' && rules.notifications.quotes) {
+        // Quote alerts - check for quote events  
+        if (event.kind === 'QUOTE' && rules.notifications.quotes) {
             const quoteAlerts = this.evaluateQuoteEvent(event, rules);
             alerts.push(...quoteAlerts);
         }
@@ -38,7 +38,7 @@ export class AlertManager {
 
     evaluateTradeEvent(event, rules) {
         const alerts = [];
-        const { price, size, side } = event.event;
+        const { price, size, side } = event; // Event data is now directly accessible
         
         if (!price || !size) return alerts;
 
@@ -86,7 +86,7 @@ export class AlertManager {
 
     evaluateQuoteEvent(event, rules) {
         const alerts = [];
-        const { bid, ask } = event.event;
+        const { bid, ask } = event; // Event data is now directly accessible
         
         // Spread analysis
         if (bid && ask) {
@@ -111,7 +111,7 @@ export class AlertManager {
 
     evaluateThresholds(event, rules) {
         const alerts = [];
-        const { price, bid, ask } = event.event;
+        const { price, bid, ask } = event; // Event data is now directly accessible
         
         // Use trade price or mid-price for threshold checks
         const checkPrice = price || (bid && ask ? (bid + ask) / 2 : bid || ask);

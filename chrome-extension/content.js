@@ -7,18 +7,14 @@ class LSContentScript {
     constructor() {
         this.watchlistData = null;
         this.isInjected = false;
+        this.tabRole = null; // 'primary' or 'secondary'
+        this.shouldConnect = false;
     }
 
     async init() {
         // Check if we're on the correct domain
         if (!this.isValidDomain()) {
             console.log('⚠️ LS Stock Ticker: Not on ls-tc.de domain, skipping initialization');
-            return;
-        }
-
-        // Check if already injected globally (check if other ls-tc.de tabs exist)
-        if (await this.hasOtherLsTcTabs()) {
-            console.log('⚠️ LS Stock Ticker: Another ls-tc.de tab is already open, skipping this tab');
             return;
         }
 
@@ -36,6 +32,13 @@ class LSContentScript {
             return;
         }
         
+        // Request tab role assignment from background script
+        const roleAssignment = await this.requestTabRole();
+        this.tabRole = roleAssignment.role;
+        this.shouldConnect = roleAssignment.shouldConnect;
+        
+        console.log(`📋 Tab assigned role: ${this.tabRole} (shouldConnect: ${this.shouldConnect})`);
+        
         // Load watchlist configuration
         await this.loadWatchlistConfig();
         
@@ -44,7 +47,25 @@ class LSContentScript {
         
         // Listen for events from the injected script
         window.addEventListener('LS_TICKER_EVENT', (event) => {
-            this.handleLightstreamerEvent(event.detail);
+            // Only primary tab should process and forward events
+            if (this.tabRole === 'primary') {
+                this.handleLightstreamerEvent(event.detail);
+            }
+        });
+        
+        // Listen for secondary tab registration from injected script
+        window.addEventListener('message', (event) => {
+            if (event.source !== window) return;
+            
+            if (event.data.type === 'LS_TICKER_SECONDARY_REGISTER') {
+                console.log('📱 Secondary tab requesting registration with instrument:', event.data.instrumentInfo);
+                this.registerSecondaryTab(event.data.instrumentInfo);
+            }
+        });
+        
+        // Listen for events from background script (for secondary tabs)
+        chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+            this.handleBackgroundMessage(message, sender, sendResponse);
         });
         
         // Monitor extension context validity
@@ -52,23 +73,94 @@ class LSContentScript {
     }
 
     async hasOtherLsTcTabs() {
-        try {
-            // Ask background script to check for other ls-tc.de tabs
-            const response = await chrome.runtime.sendMessage({
-                action: 'checkOtherLsTcTabs',
-                currentUrl: window.location.href
-            });
-            
-            if (response && response.hasOtherTabs) {
-                console.log(`⚠️ Found ${response.otherTabsCount} other ls-tc.de tab(s)`);
-                return true;
+        return new Promise((resolve, reject) => {
+            try {
+                // Ask background script to check for other ls-tc.de tabs
+                chrome.runtime.sendMessage({
+                    action: 'checkOtherLsTcTabs',
+                    currentUrl: window.location.href
+                }, (response) => {
+                    if (chrome.runtime.lastError) {
+                        console.error('❌ Failed to check other tabs:', chrome.runtime.lastError);
+                        resolve(false); // Allow injection if we can't check
+                        return;
+                    }
+                    
+                    if (response && response.hasOtherTabs) {
+                        console.log(`⚠️ Found ${response.otherTabsCount} other ls-tc.de tab(s)`);
+                        resolve(true);
+                    } else {
+                        resolve(false);
+                    }
+                });
+            } catch (error) {
+                console.error('❌ Failed to check other tabs:', error);
+                resolve(false); // Allow injection if we can't check
             }
+        });
+    }
+
+    async requestTabRole() {
+        return new Promise((resolve, reject) => {
+            try {
+                console.log('📋 Requesting tab role from background script...');
+                
+                // Set a timeout to prevent hanging
+                const timeout = setTimeout(() => {
+                    console.warn('⚠️ Tab role request timed out, using default');
+                    resolve({ role: 'primary', shouldConnect: true });
+                }, 5000); // 5 second timeout
+                
+                chrome.runtime.sendMessage(
+                    { action: 'requestTabRole' },
+                    (response) => {
+                        clearTimeout(timeout);
+                        console.log('📋 Received tab role response:', response);
+                        
+                        if (chrome.runtime.lastError) {
+                            console.error('❌ Chrome runtime error:', chrome.runtime.lastError);
+                            // Don't reject, use fallback instead
+                            resolve({ role: 'primary', shouldConnect: true });
+                            return;
+                        }
+                        
+                        if (!response) {
+                            console.warn('⚠️ Received undefined response from background script');
+                            resolve({ role: 'primary', shouldConnect: true });
+                            return;
+                        }
+                        
+                        resolve(response);
+                    }
+                );
+            } catch (error) {
+                console.error('❌ Failed to request tab role:', error);
+                resolve({ role: 'primary', shouldConnect: true }); // Default to primary if error
+            }
+        });
+    }
+
+    handleBackgroundMessage(message, sender, sendResponse) {
+        if (message.type === 'LS_EVENT_BROADCAST') {
+            // Forward the event to the injected script for chart updates
+            window.postMessage({
+                type: 'LS_TICKER_SECONDARY_EVENT',
+                data: message.eventData
+            }, '*');
+            sendResponse({ status: 'forwarded' });
+        } else if (message.type === 'PROMOTED_TO_PRIMARY') {
+            console.log('👑 Tab promoted to PRIMARY, starting LightStream connection...');
+            this.tabRole = 'primary';
+            this.shouldConnect = true;
             
-            return false;
-        } catch (error) {
-            console.error('❌ Failed to check other tabs:', error);
-            return false; // Allow injection if we can't check
+            // Notify injected script to start connecting
+            window.postMessage({
+                type: 'LS_TICKER_START_CONNECTION',
+                shouldConnect: true
+            }, '*');
+            sendResponse({ status: 'promoted' });
         }
+        return true;
     }
 
     isValidDomain() {
@@ -135,18 +227,21 @@ class LSContentScript {
         // Mark injection to prevent duplicates locally
         window.LS_TICKER_INJECTED = true;
 
-        // Pass entire watchlist to injected script for monitoring all instruments
+        // Pass entire watchlist and role information to injected script
         const dataElement = document.createElement('div');
         dataElement.id = 'ls-watchlist-data';
         dataElement.style.display = 'none';
         dataElement.setAttribute('data-watchlist', JSON.stringify(this.watchlistData));
+        dataElement.setAttribute('data-tab-role', this.tabRole);
+        dataElement.setAttribute('data-should-connect', this.shouldConnect.toString());
         document.body.appendChild(dataElement);
         
         const script = document.createElement('script');
         script.src = chrome.runtime.getURL('injected.js');
         script.onload = () => {
-            console.log('✅ LightstreamerClient integration script injected on ls-tc.de (PRIMARY TAB)');
+            console.log(`✅ LightstreamerClient integration script injected on ls-tc.de (${this.tabRole.toUpperCase()} TAB)`);
             console.log(`📊 Monitoring ${Object.keys(this.watchlistData).length} instruments`);
+            console.log(`🔌 Should connect to LightStream: ${this.shouldConnect}`);
             this.isInjected = true;
             script.remove();
         };
@@ -162,10 +257,12 @@ class LSContentScript {
     handleLightstreamerEvent(eventData) {
         console.log('📊 Received LS event:', eventData);
         
-        // Forward event to background script with minimal processing
+        // Forward event to background script with the correct structure
+        // eventData has structure: { type: 'TRADE'|'QUOTE', event: { actual data } }
         const enhancedEvent = {
             type: 'LS_EVENT',
-            event: eventData.event,
+            eventType: eventData.type, // TRADE or QUOTE
+            event: eventData.event,    // The actual event data with wkn, price, etc.
             timestamp: Date.now()
         };
 
@@ -174,24 +271,65 @@ class LSContentScript {
     }
 
     async sendToBackground(eventData) {
-        try {
-            // Check if extension context is still valid
-            if (!chrome.runtime?.id) {
-                console.log('⚠️ Extension context invalidated, skipping event send');
-                return;
-            }
+        return new Promise((resolve) => {
+            try {
+                // Check if extension context is still valid
+                if (!chrome.runtime?.id) {
+                    console.log('⚠️ Extension context invalidated, skipping event send');
+                    resolve();
+                    return;
+                }
 
-            await chrome.runtime.sendMessage(eventData);
-            console.log('✅ Event sent to background script');
-        } catch (error) {
-            if (error.message?.includes('Extension context invalidated') || 
-                error.message?.includes('receiving end does not exist')) {
-                console.log('⚠️ Extension context invalidated or background script unavailable');
-                console.log('💡 Please reload the page after extension updates');
-            } else {
+                chrome.runtime.sendMessage(eventData, (response) => {
+                    if (chrome.runtime.lastError) {
+                        if (chrome.runtime.lastError.message?.includes('Extension context invalidated') || 
+                            chrome.runtime.lastError.message?.includes('receiving end does not exist')) {
+                            console.log('⚠️ Extension context invalidated or background script unavailable');
+                            console.log('💡 Please reload the page after extension updates');
+                        } else {
+                            console.error('❌ Failed to send event to background:', chrome.runtime.lastError);
+                        }
+                    } else {
+                        console.log('✅ Event sent to background script');
+                    }
+                    resolve();
+                });
+            } catch (error) {
                 console.error('❌ Failed to send event to background:', error);
+                resolve();
             }
-        }
+        });
+    }
+
+    async registerSecondaryTab(instrumentInfo) {
+        return new Promise((resolve, reject) => {
+            try {
+                console.log('📱 Registering secondary tab with background script...');
+                
+                chrome.runtime.sendMessage({
+                    action: 'registerSecondaryTab',
+                    instrumentInfo: instrumentInfo
+                }, (response) => {
+                    if (chrome.runtime.lastError) {
+                        console.error('❌ Failed to register secondary tab:', chrome.runtime.lastError);
+                        reject(chrome.runtime.lastError);
+                        return;
+                    }
+                    
+                    if (!response) {
+                        console.warn('⚠️ Received undefined response from background script');
+                        resolve({ status: 'unknown' });
+                        return;
+                    }
+                    
+                    console.log('✅ Secondary tab registered successfully:', response);
+                    resolve(response);
+                });
+            } catch (error) {
+                console.error('❌ Failed to register secondary tab:', error);
+                reject(error);
+            }
+        });
     }
 }
 

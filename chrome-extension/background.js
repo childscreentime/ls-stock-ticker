@@ -10,15 +10,33 @@ class BackgroundService {
         this.config = new StockConfig();
         this.alertManager = new AlertManager();
         this.webhookManager = new WebhookManager();
-        this.activeTabs = new Map(); // WKN -> tabId mapping
         this.recentEvents = []; // Store last 100 events for popup
         this.maxEvents = 100;
+        
+        // Primary/Secondary tab management
+        this.primaryTabId = null; // The tab that maintains LightStream connection
+        this.secondaryTabs = new Set(); // Tabs that only display charts
+        this.lsTcTabs = new Map(); // tabId -> tab info mapping (includes instrumentInfo)
+        this.stateRestored = false; // Flag to track if state restoration is complete
+        this.roleAssignmentLock = false; // Prevent concurrent role assignments
+        
+        console.log('🚀 BackgroundService constructor called');
+        console.log('🔍 Initial state - primaryTabId:', this.primaryTabId);
+        console.log('🔍 Initial state - secondaryTabs:', Array.from(this.secondaryTabs));
         
         this.init();
     }
 
     async init() {
         console.log('🚀 LS Stock Ticker Background Service starting...');
+        
+        // Restore persisted tab state
+        await this.restoreTabState();
+        this.stateRestored = true;
+        console.log('✅ Tab state restoration complete');
+        
+        // Validate tab role integrity after restoration
+        await this.validateTabRoleIntegrity();
         
         // Listen for extension installation/startup
         chrome.runtime.onInstalled.addListener(() => this.onInstalled());
@@ -41,6 +59,103 @@ class BackgroundService {
         
         await this.setupWatchlistTabs();
     }
+    
+    async restoreTabState() {
+        try {
+            console.log('🔄 Restoring tab state from storage...');
+            const result = await chrome.storage.local.get(['primaryTabId', 'secondaryTabs', 'lsTcTabs']);
+            console.log('🔍 Raw stored data:', result);
+            
+            let stateChanged = false;
+            
+            if (result.primaryTabId) {
+                // Check if the primary tab is still active
+                console.log(`🔍 Checking stored primary tab ${result.primaryTabId}...`);
+                const isActive = await this.isTabActive(result.primaryTabId);
+                if (isActive) {
+                    this.primaryTabId = result.primaryTabId;
+                    console.log(`✅ Restored primary tab: ${this.primaryTabId}`);
+                } else {
+                    console.log(`⚠️ Stored primary tab ${result.primaryTabId} is no longer active`);
+                    this.primaryTabId = null;
+                    stateChanged = true;
+                }
+            } else {
+                console.log('🔍 No primary tab stored');
+            }
+            
+            if (result.secondaryTabs && Array.isArray(result.secondaryTabs)) {
+                console.log(`🔍 Checking ${result.secondaryTabs.length} stored secondary tabs...`);
+                // Validate each secondary tab
+                for (const tabId of result.secondaryTabs) {
+                    console.log(`🔍 Checking stored secondary tab ${tabId}...`);
+                    
+                    // Defensive check: Don't restore primary tab as secondary
+                    if (this.primaryTabId === tabId) {
+                        console.log(`⚠️ Stored secondary tab ${tabId} is now the primary tab, skipping`);
+                        stateChanged = true;
+                        continue;
+                    }
+                    
+                    const isActive = await this.isTabActive(tabId);
+                    if (isActive) {
+                        this.secondaryTabs.add(tabId);
+                        console.log(`✅ Restored secondary tab: ${tabId}`);
+                    } else {
+                        console.log(`⚠️ Stored secondary tab ${tabId} is no longer active`);
+                        stateChanged = true;
+                    }
+                }
+            } else {
+                console.log('🔍 No secondary tabs stored');
+            }
+            
+            if (result.lsTcTabs) {
+                // Only restore tab info for active tabs
+                const activeTabIds = new Set([this.primaryTabId, ...this.secondaryTabs].filter(Boolean));
+                const storedEntries = Object.entries(result.lsTcTabs);
+                console.log(`🔍 Filtering ${storedEntries.length} stored tab info entries...`);
+                
+                for (const [tabIdStr, tabInfo] of storedEntries) {
+                    const tabId = parseInt(tabIdStr);
+                    if (activeTabIds.has(tabId)) {
+                        this.lsTcTabs.set(tabId, tabInfo);
+                    } else {
+                        console.log(`🗑️ Removing stale tab info for inactive tab ${tabId}`);
+                        stateChanged = true;
+                    }
+                }
+                console.log(`✅ Restored ${this.lsTcTabs.size} active tab info entries`);
+            } else {
+                console.log('🔍 No tab info stored');
+            }
+            
+            console.log(`🔍 Final state - primaryTabId: ${this.primaryTabId}`);
+            console.log(`🔍 Final state - secondaryTabs: ${Array.from(this.secondaryTabs)}`);
+            console.log(`🔍 Final state - lsTcTabs size: ${this.lsTcTabs.size}`);
+            
+            // Persist cleaned up state if changes were made
+            if (stateChanged) {
+                await this.persistTabState();
+                console.log('💾 Persisted cleaned up tab state');
+            }
+        } catch (error) {
+            console.error('❌ Failed to restore tab state:', error);
+        }
+    }
+    
+    async persistTabState() {
+        try {
+            await chrome.storage.local.set({
+                primaryTabId: this.primaryTabId,
+                secondaryTabs: Array.from(this.secondaryTabs),
+                lsTcTabs: Object.fromEntries(this.lsTcTabs)
+            });
+            console.log('💾 Tab state persisted to storage');
+        } catch (error) {
+            console.error('❌ Failed to persist tab state:', error);
+        }
+    }
 
     async onInstalled() {
         console.log('📦 Extension installed, setting up initial configuration...');
@@ -53,27 +168,99 @@ class BackgroundService {
         await this.setupWatchlistTabs();
     }
 
-    async handleMessage(message, sender, sendResponse) {
-        if (message.type === 'LS_EVENT') {
-            await this.processLightstreamerEvent(message, sender.tab);
-            sendResponse({ status: 'received' });
-        } else if (message.type === 'GET_RECENT_EVENTS') {
-            sendResponse({ events: this.recentEvents.slice(-50) });
-        } else if (message.type === 'TOGGLE_ALERTS') {
-            await this.toggleAlerts(message.wkn, message.enabled);
-            sendResponse({ status: 'updated' });
-        } else if (message.type === 'GET_TAB_STATUS') {
-            const status = await this.getTabStatus();
-            sendResponse({ status });
-        } else if (message.type === 'CONFIG_UPDATED') {
-            console.log('🔄 Configuration updated, refreshing tabs...');
-            await this.setupWatchlistTabs();
-            sendResponse({ status: 'refreshed' });
-        } else if (message.action === 'checkOtherLsTcTabs') {
-            const result = await this.checkOtherLsTcTabs(message.currentUrl);
-            sendResponse(result);
+    handleMessage(message, sender, sendResponse) {
+        console.log('📨 Received message:', message.type || message.action, 'from tab:', sender.tab?.id);
+        
+        try {
+            if (message.type === 'LS_EVENT') {
+                // Handle async without await in main function
+                this.processLightstreamerEvent(message, sender.tab)
+                    .then(() => this.broadcastToSecondaryTabs(message))
+                    .then(() => sendResponse({ status: 'received' }))
+                    .catch(error => {
+                        console.error('❌ Error handling LS_EVENT:', error);
+                        sendResponse({ error: error.message });
+                    });
+                return true; // Keep channel open
+                
+            } else if (message.type === 'GET_RECENT_EVENTS') {
+                sendResponse({ events: this.recentEvents.slice(-50) });
+                
+            } else if (message.type === 'TOGGLE_ALERTS') {
+                this.toggleAlerts(message.wkn, message.enabled)
+                    .then(() => sendResponse({ status: 'updated' }))
+                    .catch(error => {
+                        console.error('❌ Error toggling alerts:', error);
+                        sendResponse({ error: error.message });
+                    });
+                return true; // Keep channel open
+                
+            } else if (message.type === 'GET_TAB_STATUS') {
+                console.log('📊 Processing GET_TAB_STATUS request...');
+                this.getTabStatus()
+                    .then(status => {
+                        console.log('📊 getTabStatus() returned:', status);
+                        const response = { status };
+                        console.log('📊 Sending response:', response);
+                        sendResponse(response);
+                    })
+                    .catch(error => {
+                        console.error('❌ Error in GET_TAB_STATUS:', error);
+                        sendResponse({ error: error.message });
+                    });
+                return true; // Keep channel open
+                
+            } else if (message.type === 'CONFIG_UPDATED') {
+                console.log('🔄 Configuration updated, refreshing tabs...');
+                this.setupWatchlistTabs()
+                    .then(() => sendResponse({ status: 'refreshed' }))
+                    .catch(error => {
+                        console.error('❌ Error refreshing tabs:', error);
+                        sendResponse({ error: error.message });
+                    });
+                return true; // Keep channel open
+                
+            } else if (message.action === 'requestTabRole') {
+                console.log(`📋 Processing requestTabRole for tab ${sender.tab.id}...`);
+                this.assignTabRole(sender.tab.id)
+                    .then(role => {
+                        console.log(`📋 Sending role response:`, role);
+                        sendResponse(role);
+                    })
+                    .catch(error => {
+                        console.error('❌ Error in assignTabRole:', error);
+                        sendResponse({ role: 'primary', shouldConnect: true, error: error.message });
+                    });
+                return true; // Keep channel open
+                
+            } else if (message.action === 'registerSecondaryTab') {
+                this.registerSecondaryTab(sender.tab.id, message.instrumentInfo)
+                    .then(() => sendResponse({ status: 'registered' }))
+                    .catch(error => {
+                        console.error('❌ Error registering secondary tab:', error);
+                        sendResponse({ error: error.message });
+                    });
+                return true; // Keep channel open
+                
+            } else if (message.action === 'checkOtherLsTcTabs') {
+                this.checkOtherLsTcTabs(message.currentUrl)
+                    .then(result => sendResponse(result))
+                    .catch(error => {
+                        console.error('❌ Error checking other tabs:', error);
+                        sendResponse({ error: error.message });
+                    });
+                return true; // Keep channel open
+                
+            } else {
+                console.warn('⚠️ Unknown message type/action:', message);
+                sendResponse({ error: 'Unknown message type' });
+            }
+        } catch (error) {
+            console.error('❌ Error handling message:', error);
+            sendResponse({ error: error.message });
         }
-        return true; // Keep message channel open for async response
+        
+        return false; // Synchronous response for unknown messages
     }
 
     async handleAlarm(alarm) {
@@ -84,14 +271,20 @@ class BackgroundService {
     }
 
     onTabRemoved(tabId) {
-        // Remove tab from our tracking
-        for (const [wkn, id] of this.activeTabs.entries()) {
-            if (id === tabId) {
-                console.log(`🗑️ Tab removed for ${wkn}, will scan for other ls-tc.de tabs`);
-                this.activeTabs.delete(wkn);
-                break;
-            }
+        console.log(`🗑️ Tab ${tabId} removed`);
+
+        // Handle primary/secondary tab cleanup
+        if (tabId === this.primaryTabId) {
+            console.log(`🔄 Primary tab ${tabId} removed, promoting secondary tab...`);
+            this.promotePrimaryTab();
+        } else {
+            this.secondaryTabs.delete(tabId);
         }
+        
+        this.lsTcTabs.delete(tabId);
+        
+        // Persist the updated state
+        this.persistTabState();
 
         // Check if the removed tab was the injected tab and clean up
         this.cleanupInjectedTabIfRemoved(tabId);
@@ -129,16 +322,10 @@ class BackgroundService {
     }
 
     onTabUpdated(tabId, changeInfo, tab) {
-        // Check if this is a newly loaded ls-tc.de page
+        // Tab detection is now handled through tab registration
+        // when content script injects and secondary tabs register
         if (changeInfo.status === 'complete' && tab.url && tab.url.includes('ls-tc.de/de/aktie/')) {
-            const instrumentInfo = this.extractInstrumentFromTabUrl(tab.url);
-            if (instrumentInfo) {
-                const key = instrumentInfo.wkn || instrumentInfo.id || tabId.toString();
-                if (!this.activeTabs.has(key)) {
-                    console.log(`🆕 Detected new ls-tc.de tab: ${tab.url}`);
-                    this.activeTabs.set(key, tabId);
-                }
-            }
+            console.log(`🆕 Detected ls-tc.de tab: ${tab.url} - waiting for tab registration`);
         }
     }
 
@@ -151,72 +338,13 @@ class BackgroundService {
         try {
             // Query all open tabs for ls-tc.de
             const tabs = await chrome.tabs.query({ url: "https://www.ls-tc.de/*" });
-            console.log(`🔍 Found ${tabs.length} existing ls-tc.de tabs`);
+            console.log(`🔍 Found ${tabs.length} existing ls-tc.de tabs - waiting for them to register`);
             
-            for (const tab of tabs) {
-                const instrumentInfo = this.extractInstrumentFromTabUrl(tab.url);
-                if (instrumentInfo) {
-                    console.log(`✅ Tracking existing tab ${tab.id}: ${instrumentInfo.name || instrumentInfo.id}`);
-                    this.activeTabs.set(instrumentInfo.wkn || instrumentInfo.id, tab.id);
-                }
-            }
+            // No longer extract instrument info from URLs
+            // Tabs will register themselves when content script loads
         } catch (error) {
             console.error('❌ Failed to scan existing tabs:', error);
         }
-    }
-
-    extractInstrumentFromTabUrl(url) {
-        // Extract instrument info from ls-tc.de URL
-        // Examples: 
-        // https://www.ls-tc.de/de/aktie/nvidia-dl-01-aktie
-        // https://www.ls-tc.de/de/aktie/43763
-        
-        const urlObj = new URL(url);
-        const pathMatch = urlObj.pathname.match(/\/aktie\/([^\/]+)/);
-        
-        if (pathMatch) {
-            const slugOrId = pathMatch[1];
-            
-            // If it's a numeric ID, use it directly
-            if (/^\d+$/.test(slugOrId)) {
-                return {
-                    id: slugOrId,
-                    wkn: null,
-                    name: null
-                };
-            }
-            
-            // For slug-based URLs, try to map to known instruments
-            // This is a simplified mapping - in practice you'd need more comprehensive mapping
-            const knownMappings = {
-                'nvidia-dl-01-aktie': { id: '43763', wkn: '918422', name: 'NVIDIA CORP. DL-,001' }
-                // Add more mappings as needed
-            };
-            
-            return knownMappings[slugOrId] || {
-                id: null,
-                wkn: null,
-                name: slugOrId
-            };
-        }
-        
-        return null;
-    }
-
-    // Remove the old tab creation method and replace with tracking only
-    async trackExistingTab(tabId, instrumentInfo) {
-        try {
-            const tab = await chrome.tabs.get(tabId);
-            if (tab && tab.url.includes('ls-tc.de')) {
-                const key = instrumentInfo.wkn || instrumentInfo.id || tabId.toString();
-                this.activeTabs.set(key, tabId);
-                console.log(`✅ Now tracking tab ${tabId} for instrument ${key}`);
-                return tabId;
-            }
-        } catch (error) {
-            console.error(`❌ Failed to track tab ${tabId}:`, error);
-        }
-        return null;
     }
 
     async ensureWatchlistTabs() {
@@ -224,12 +352,20 @@ class BackgroundService {
         await this.findExistingLSTabs();
     }
 
-    async processLightstreamerEvent(event, tab) {
-        console.log('📊 Processing LS event:', event);
+    async processLightstreamerEvent(message, tab) {
+        console.log('📊 Processing LS event:', message);
+        
+        // Extract the actual event data from the message structure
+        const eventData = message.event; // This contains the actual trade/quote data
+        const eventType = message.eventType; // TRADE or QUOTE
+        
+        console.log('📊 Event type:', eventType);
+        console.log('📊 Event data:', eventData);
         
         // Add to recent events for popup
         const eventWithTimestamp = {
-            ...event,
+            ...eventData,
+            type: eventType,
             timestamp: Date.now(),
             tabId: tab?.id
         };
@@ -239,16 +375,24 @@ class BackgroundService {
             this.recentEvents.shift();
         }
 
-        // Check alert rules
-        const alertRules = await this.config.getAlertRules(event.wkn);
-        if (alertRules && alertRules.enabled) {
-            await this.checkAlerts(event, alertRules);
+        // Check alert rules using the actual event data
+        if (eventData && eventData.wkn) {
+            console.log('📊 Checking alerts for WKN:', eventData.wkn);
+            const alertRules = await this.config.getAlertRules(eventData.wkn);
+            if (alertRules && alertRules.enabled) {
+                console.log('📊 Alert rules found, checking conditions...');
+                await this.checkAlerts(eventData, alertRules);
+            } else {
+                console.log('📊 No alert rules or disabled for WKN:', eventData.wkn);
+            }
+        } else {
+            console.log('📊 No WKN found in event data:', eventData);
         }
 
         // Send to webhook if configured
         const webhookConfig = await this.config.getWebhookConfig();
         if (webhookConfig && webhookConfig.enabled) {
-            await this.webhookManager.sendEvent(event, webhookConfig);
+            await this.webhookManager.sendEvent(eventData, webhookConfig);
         }
     }
 
@@ -283,30 +427,325 @@ class BackgroundService {
     }
 
     async getTabStatus() {
-        const watchlist = await this.config.getWatchlist();
-        const status = {};
+        console.log('📊 getTabStatus() called');
         
+        try {
+            const watchlist = await this.config.getWatchlist();
+            console.log('📊 Watchlist loaded:', watchlist);
+            const status = {};
+            
+            // Get all ls-tc.de tabs
+            let allLsTabs = [];
+            try {
+                const tabs = await chrome.tabs.query({ url: "https://www.ls-tc.de/*" });
+                allLsTabs = tabs;
+                console.log(`📊 Found ${allLsTabs.length} ls-tc.de tabs`);
+            } catch (error) {
+                console.error('❌ Failed to query tabs:', error);
+            }
+            
+            // Build status for each watchlist instrument
         for (const [wkn, instrument] of Object.entries(watchlist)) {
-            const tabId = this.activeTabs.get(wkn);
+            // Check if any registered tab is viewing this instrument
+            let matchingTabId = null;
+            let tabRole = null;
             let tabStatus = 'missing';
             
-            if (tabId) {
-                try {
-                    const tab = await chrome.tabs.get(tabId);
-                    tabStatus = tab.discarded ? 'discarded' : 'active';
-                } catch {
-                    tabStatus = 'missing';
+            // Look through registered tabs for this instrument
+            for (const [tabId, tabInfo] of this.lsTcTabs.entries()) {
+                if (tabInfo.instrumentInfo && tabInfo.instrumentInfo.wkn === wkn) {
+                    matchingTabId = tabId;
+                    tabRole = tabInfo.role;
+                    // Check if tab is still active
+                    const matchingTab = allLsTabs.find(tab => tab.id === tabId);
+                    if (matchingTab) {
+                        tabStatus = matchingTab.discarded ? 'discarded' : 'active';
+                    } else {
+                        tabStatus = 'missing';
+                    }
+                    break;
                 }
             }
             
             status[wkn] = {
                 name: instrument.name,
-                tabId,
-                status: tabStatus
+                tabId: matchingTabId,
+                status: tabStatus,
+                role: tabRole, // 'primary', 'secondary', or null
+                isin: instrument.isin
             };
         }
         
+        // Add summary information
+        status._summary = {
+            primaryTabId: this.primaryTabId,
+            secondaryTabCount: this.secondaryTabs.size,
+            totalLsTabs: allLsTabs.length,
+            watchlistInstruments: Object.keys(watchlist).length
+        };
+        
+        console.log('📊 getTabStatus() returning:', status);
         return status;
+        
+        } catch (error) {
+            console.error('❌ Error in getTabStatus():', error);
+            return {
+                _error: error.message,
+                _summary: {
+                    primaryTabId: this.primaryTabId,
+                    secondaryTabCount: this.secondaryTabs.size,
+                    totalLsTabs: 0,
+                    watchlistInstruments: 0
+                }
+            };
+        }
+    }
+
+    // Primary/Secondary Tab Management
+    async assignTabRole(tabId) {
+        console.log(`🔍 Tab ${tabId} requesting role assignment...`);
+        
+        // Wait for any ongoing role assignment to complete with timeout
+        let lockWaitCount = 0;
+        while (this.roleAssignmentLock && lockWaitCount < 100) { // 5 second timeout
+            console.log(`⏳ Tab ${tabId} waiting for role assignment lock... (${lockWaitCount})`);
+            await new Promise(resolve => setTimeout(resolve, 50));
+            lockWaitCount++;
+        }
+        
+        if (this.roleAssignmentLock) {
+            console.error(`❌ Role assignment lock timeout for tab ${tabId}`);
+            return { role: 'primary', shouldConnect: true, error: 'Lock timeout' };
+        }
+        
+        // Acquire lock
+        this.roleAssignmentLock = true;
+        console.log(`🔒 Tab ${tabId} acquired role assignment lock`);
+        
+        try {
+            // Wait for state restoration to complete
+            if (!this.stateRestored) {
+                console.log('⏳ Waiting for state restoration to complete...');
+                let waitCount = 0;
+                while (!this.stateRestored && waitCount < 50) {
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                    waitCount++;
+                }
+                if (!this.stateRestored) {
+                    console.warn('⚠️ State restoration timed out, proceeding anyway');
+                } else {
+                    console.log('✅ State restoration complete, proceeding with role assignment');
+                }
+            }
+            
+            console.log(`🔍 Current primary tab ID: ${this.primaryTabId}`);
+            console.log(`🔍 Current secondary tabs:`, Array.from(this.secondaryTabs));
+            
+            // If no primary tab exists, make this tab primary
+            if (!this.primaryTabId) {
+                this.primaryTabId = tabId;
+                this.lsTcTabs.set(tabId, { role: 'primary', timestamp: Date.now() });
+                console.log(`👑 Tab ${tabId} assigned as PRIMARY tab (first tab)`);
+                await this.persistTabState();
+                return { role: 'primary', shouldConnect: true };
+            }
+            
+            // Check if primary tab is still active
+            console.log(`🔍 Checking if primary tab ${this.primaryTabId} is still active...`);
+            const isPrimaryActive = await this.isTabActive(this.primaryTabId);
+            console.log(`🔍 Primary tab ${this.primaryTabId} active: ${isPrimaryActive}`);
+            
+            if (!isPrimaryActive) {
+                // Primary tab is gone, promote this tab
+                console.log(`⚠️ Primary tab ${this.primaryTabId} is no longer active, promoting tab ${tabId}`);
+                this.primaryTabId = tabId;
+                this.secondaryTabs.clear(); // Clear old secondary tabs
+                this.lsTcTabs.set(tabId, { role: 'primary', timestamp: Date.now() });
+                console.log(`👑 Tab ${tabId} promoted to PRIMARY tab (old primary inactive)`);
+                await this.persistTabState();
+                return { role: 'primary', shouldConnect: true };
+            }
+            
+            // Make this tab secondary
+            // Defensive check: Ensure we're not adding primary tab to secondary tabs
+            if (this.primaryTabId === tabId) {
+                console.log(`⚠️ Critical error: Attempted to add primary tab ${tabId} to secondary tabs!`);
+                await this.persistTabState();
+                return { role: 'primary', shouldConnect: true };
+            }
+            
+            this.secondaryTabs.add(tabId);
+            this.lsTcTabs.set(tabId, { role: 'secondary', timestamp: Date.now() });
+            console.log(`📱 Tab ${tabId} assigned as SECONDARY tab`);
+            await this.persistTabState();
+            return { role: 'secondary', shouldConnect: false };
+            
+        } finally {
+            // Always release lock
+            this.roleAssignmentLock = false;
+            console.log(`🔓 Tab ${tabId} released role assignment lock`);
+            
+            // Validate integrity after role assignment
+            setTimeout(() => this.validateTabRoleIntegrity(), 100);
+        }
+    }
+
+    async registerSecondaryTab(tabId, instrumentInfo) {
+        // Defensive check: Don't add primary tab to secondary tabs
+        if (this.primaryTabId === tabId) {
+            console.log(`⚠️ Cannot register primary tab ${tabId} as secondary tab`);
+            return;
+        }
+        
+        this.secondaryTabs.add(tabId);
+        this.lsTcTabs.set(tabId, { 
+            role: 'secondary', 
+            timestamp: Date.now(),
+            instrumentInfo 
+        });
+        console.log(`📱 Secondary tab ${tabId} registered for ${instrumentInfo?.name || 'unknown instrument'}`);
+    }
+
+    async promotePrimaryTab() {
+        // Find the oldest secondary tab to promote
+        let oldestTabId = null;
+        let oldestTimestamp = Date.now();
+        
+        for (const tabId of this.secondaryTabs) {
+            const tabInfo = this.lsTcTabs.get(tabId);
+            const isActive = await this.isTabActive(tabId);
+            
+            if (isActive && tabInfo && tabInfo.timestamp < oldestTimestamp) {
+                oldestTimestamp = tabInfo.timestamp;
+                oldestTabId = tabId;
+            }
+        }
+        
+        if (oldestTabId) {
+            // Promote the oldest secondary tab
+            this.primaryTabId = oldestTabId;
+            this.secondaryTabs.delete(oldestTabId);
+            this.lsTcTabs.set(oldestTabId, { role: 'primary', timestamp: Date.now() });
+            
+            console.log(`👑 Tab ${oldestTabId} promoted from secondary to PRIMARY`);
+            
+            // Notify the promoted tab to start connecting
+            try {
+                await chrome.tabs.sendMessage(oldestTabId, {
+                    type: 'PROMOTED_TO_PRIMARY',
+                    shouldConnect: true
+                });
+            } catch (error) {
+                console.error(`❌ Failed to notify promoted tab ${oldestTabId}:`, error);
+            }
+        } else {
+            console.log(`⚠️ No secondary tab available for promotion`);
+            this.primaryTabId = null;
+        }
+    }
+
+    async broadcastToSecondaryTabs(eventMessage) {
+        // Extract instrument identifier from the event
+        const eventData = eventMessage.event;
+        const eventInstrumentWkn = eventData?.wkn;
+        
+        if (!eventInstrumentWkn) {
+            console.log('⚠️ No WKN found in event, skipping secondary tab broadcast');
+            return;
+        }
+        
+        console.log(`📡 Broadcasting event for WKN ${eventInstrumentWkn} to matching secondary tabs...`);
+        
+        const secondaryTabIds = Array.from(this.secondaryTabs);
+        let stateChanged = false;
+        let sentCount = 0;
+        
+        for (const tabId of secondaryTabIds) {
+            try {
+                const isActive = await this.isTabActive(tabId);
+                if (!isActive) {
+                    console.log(`🗑️ Removing inactive secondary tab ${tabId}`);
+                    this.secondaryTabs.delete(tabId);
+                    this.lsTcTabs.delete(tabId);
+                    stateChanged = true;
+                    continue;
+                }
+                
+                // Check if this tab is viewing the same instrument
+                const tabInfo = this.lsTcTabs.get(tabId);
+                const tabInstrumentWkn = tabInfo?.instrumentInfo?.wkn;
+                
+                if (tabInstrumentWkn === eventInstrumentWkn) {
+                    console.log(`� Sending event to secondary tab ${tabId} (WKN: ${tabInstrumentWkn})`);
+                    await chrome.tabs.sendMessage(tabId, {
+                        type: 'LS_EVENT_BROADCAST',
+                        eventData: eventMessage
+                    });
+                    sentCount++;
+                } else {
+                    console.log(`⏭️ Skipping secondary tab ${tabId} (different instrument: ${tabInstrumentWkn} vs ${eventInstrumentWkn})`);
+                }
+                
+            } catch (error) {
+                console.error(`❌ Failed to broadcast to secondary tab ${tabId}:`, error);
+                console.log(`🗑️ Removing failed secondary tab ${tabId}`);
+                this.secondaryTabs.delete(tabId);
+                this.lsTcTabs.delete(tabId);
+                stateChanged = true;
+            }
+        }
+        
+        console.log(`📡 Event broadcast complete: sent to ${sentCount} matching secondary tabs`);
+        
+        // Persist state if any tabs were removed
+        if (stateChanged) {
+            await this.persistTabState();
+            console.log(`💾 Updated tab state after cleaning up inactive secondary tabs`);
+        }
+    }
+
+    async isTabActive(tabId) {
+        try {
+            console.log(`🔍 Checking if tab ${tabId} is active...`);
+            const tab = await chrome.tabs.get(tabId);
+            console.log(`🔍 Tab ${tabId} info:`, { url: tab.url, discarded: tab.discarded, status: tab.status });
+            const isActive = !tab.discarded;
+            console.log(`🔍 Tab ${tabId} is ${isActive ? 'active' : 'inactive'}`);
+            return isActive;
+        } catch (error) {
+            console.log(`🔍 Tab ${tabId} check failed:`, error.message);
+            return false;
+        }
+    }
+
+    async validateTabRoleIntegrity() {
+        console.log('🔍 Validating tab role integrity...');
+        let hasErrors = false;
+        
+        // Check if primary tab is in secondary tabs
+        if (this.primaryTabId && this.secondaryTabs.has(this.primaryTabId)) {
+            console.error(`❌ CRITICAL ERROR: Primary tab ${this.primaryTabId} is in secondary tabs!`);
+            this.secondaryTabs.delete(this.primaryTabId);
+            hasErrors = true;
+        }
+        
+        // Check if any secondary tab is set as primary
+        for (const tabId of this.secondaryTabs) {
+            if (tabId === this.primaryTabId) {
+                console.error(`❌ CRITICAL ERROR: Secondary tab ${tabId} is also the primary tab!`);
+                this.secondaryTabs.delete(tabId);
+                hasErrors = true;
+            }
+        }
+        
+        if (hasErrors) {
+            console.log('🔧 Fixed tab role integrity errors, persisting corrected state...');
+            await this.persistTabState();
+        } else {
+            console.log('✅ Tab role integrity validation passed');
+        }
+        
+        return !hasErrors;
     }
 
 }

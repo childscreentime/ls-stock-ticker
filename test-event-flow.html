@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Event Flow Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        .step { margin: 10px 0; padding: 10px; border: 1px solid #ccc; }
+        .success { background: #d4edda; border-color: #c3e6cb; }
+        .error { background: #f8d7da; border-color: #f5c6cb; }
+        button { padding: 10px 20px; margin: 5px; }
+        #log { background: #f8f9fa; padding: 10px; border: 1px solid #dee2e6; height: 300px; overflow-y: auto; }
+    </style>
+</head>
+<body>
+    <h1>LS Stock Ticker Event Flow Test</h1>
+    
+    <div class="step">
+        <h3>Step 1: Simulate Event from Injected Script</h3>
+        <button onclick="simulateTradeEvent()">Simulate TRADE Event</button>
+        <button onclick="simulateQuoteEvent()">Simulate QUOTE Event</button>
+    </div>
+    
+    <div class="step">
+        <h3>Step 2: Check Event Reception</h3>
+        <div id="eventStatus">Waiting for events...</div>
+    </div>
+    
+    <div class="step">
+        <h3>Event Log</h3>
+        <div id="log"></div>
+    </div>
+
+    <script>
+        const log = document.getElementById('log');
+        const eventStatus = document.getElementById('eventStatus');
+        let eventCount = 0;
+        
+        function addLog(message) {
+            const time = new Date().toLocaleTimeString();
+            log.innerHTML += `[${time}] ${message}<br>`;
+            log.scrollTop = log.scrollHeight;
+        }
+        
+        // Listen for the same events that content script listens for
+        window.addEventListener('LS_TICKER_EVENT', (event) => {
+            eventCount++;
+            eventStatus.innerHTML = `✅ Received ${eventCount} event(s)`;
+            eventStatus.className = 'success';
+            
+            addLog(`📊 Event received: ${JSON.stringify(event.detail, null, 2)}`);
+            
+            // Simulate what content script does
+            handleLightstreamerEvent(event.detail);
+        });
+        
+        function handleLightstreamerEvent(eventData) {
+            addLog(`📋 Content script would process: Type=${eventData.type}, Event=${JSON.stringify(eventData.event)}`);
+            
+            // Simulate the enhanced event structure
+            const enhancedEvent = {
+                type: 'LS_EVENT',
+                eventType: eventData.type,
+                event: eventData.event,
+                timestamp: Date.now()
+            };
+            
+            addLog(`📤 Would send to background: ${JSON.stringify(enhancedEvent, null, 2)}`);
+            
+            // Simulate background processing
+            processLightstreamerEvent(enhancedEvent);
+        }
+        
+        function processLightstreamerEvent(message) {
+            addLog(`🔄 Background script processing...`);
+            
+            const eventData = message.event;
+            const eventType = message.eventType;
+            
+            addLog(`📊 Event type: ${eventType}`);
+            addLog(`📊 Event data: ${JSON.stringify(eventData)}`);
+            
+            if (eventData && eventData.wkn) {
+                addLog(`✅ WKN found: ${eventData.wkn} - Alert rules would be checked`);
+                addLog(`🔔 Would check alerts for: ${eventData.name || 'Unknown'} (${eventData.wkn})`);
+            } else {
+                addLog(`❌ No WKN found in event data`);
+            }
+        }
+        
+        function simulateTradeEvent() {
+            addLog(`🔥 Simulating TRADE event...`);
+            
+            // Simulate the exact structure from injected.js
+            const tradeEvent = new CustomEvent('LS_TICKER_EVENT', {
+                detail: {
+                    type: 'TRADE',
+                    event: {
+                        kind: 'TRADE',
+                        price: 152.45,
+                        size: 100,
+                        side: 'buy',
+                        ts: Date.now(),
+                        name: 'Test Stock',
+                        wkn: 'TEST123',
+                        isin: 'DE000TEST123',
+                        direction: 'BUY'
+                    }
+                }
+            });
+            
+            window.dispatchEvent(tradeEvent);
+        }
+        
+        function simulateQuoteEvent() {
+            addLog(`📈 Simulating QUOTE event...`);
+            
+            // Simulate the exact structure from injected.js
+            const quoteEvent = new CustomEvent('LS_TICKER_EVENT', {
+                detail: {
+                    type: 'QUOTE',
+                    event: {
+                        kind: 'QUOTE',
+                        bid: 152.40,
+                        ask: 152.50,
+                        ts: Date.now(),
+                        name: 'Test Stock',
+                        wkn: 'TEST123',
+                        isin: 'DE000TEST123',
+                        price: 152.50
+                    }
+                }
+            });
+            
+            window.dispatchEvent(quoteEvent);
+        }
+        
+        addLog(`🚀 Event flow test initialized`);
+        addLog(`📋 Click buttons above to simulate events`);
+    </script>
+</body>
+</html>

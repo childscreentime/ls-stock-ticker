@@ -310,6 +310,50 @@ input:checked + .slider:before {
     font-size: 13px;
 }
 
+/* Tab Summary */
+.tab-summary {
+    background: #e3f2fd;
+    padding: 12px;
+    margin-bottom: 12px;
+    border-radius: 6px;
+    border-left: 3px solid #2196f3;
+}
+
+.summary-item {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 4px;
+    font-size: 12px;
+}
+
+.summary-item:last-child {
+    margin-bottom: 0;
+}
+
+.summary-item .label {
+    color: #666;
+    font-weight: 500;
+}
+
+.summary-item .value {
+    color: #333;
+    font-weight: 600;
+}
+
+/* Tab ID display */
+.tab-id {
+    color: #666;
+    font-size: 11px;
+    margin-left: 8px;
+}
+
+/* Role indicators */
+.status-indicator {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
 /* Animations */
 @keyframes spin {
     from { transform: rotate(0deg); }

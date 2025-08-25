@@ -18,6 +18,8 @@
     let tradingHandler;
     let isInitialized = false;
     let realtimeChart = null; // Chart instance
+    let tabRole = null; // Will be set from content script data
+    let shouldConnect = null; // Will be set from content script data
     
     // Trading Event Handler
     class TradingEventHandler {
@@ -743,6 +745,27 @@
         
         console.log('✅ LightstreamerClient found! Setting up integration...');
         
+        // Read tab role information FIRST before making any decisions
+        const dataElement = document.getElementById('ls-watchlist-data');
+        if (dataElement) {
+            const roleAttr = dataElement.getAttribute('data-tab-role');
+            const shouldConnectAttr = dataElement.getAttribute('data-should-connect');
+            
+            console.log('🔍 Raw attributes:', {
+                'data-tab-role': roleAttr,
+                'data-should-connect': shouldConnectAttr
+            });
+            
+            tabRole = roleAttr || 'primary';
+            shouldConnect = shouldConnectAttr === 'true';
+            
+            console.log(`📋 Tab role: ${tabRole}, should connect: ${shouldConnect}`);
+        } else {
+            console.warn('⚠️ No watchlist data element found - using defaults');
+            tabRole = 'primary';
+            shouldConnect = true;
+        }
+        
         // Find existing client instance
         let client = window.lsClient || window.lightstreamerClient || window.client;
         
@@ -762,20 +785,77 @@
         }
         
         if (!client) {
-            console.log('🔧 Creating new LightstreamerClient...');
-            client = new LightstreamerClient("https://push.ls-tc.de:443", "WALLSTREETONLINE");
+            // Additional safety check: look for existing LightstreamerClient connections
+            const existingClients = Object.keys(window).filter(key => 
+                window[key] && 
+                typeof window[key] === 'object' && 
+                window[key].constructor && 
+                window[key].constructor.name === 'LightstreamerClient' &&
+                window[key].getStatus && 
+                window[key].getStatus().includes('CONNECT')
+            );
             
-            // Store reference for future use
-            window.lsClient = client;
+            if (existingClients.length > 0) {
+                console.log('⚠️ Found existing LightstreamerClient connection, becoming secondary tab');
+                tabRole = 'secondary';
+                shouldConnect = false;
+                setupSubscriptions(null);
+                return;
+            }
             
-            // Connect the client
-            if (client.connect) {
-                client.connect();
-                console.log('🔌 LightstreamerClient connecting...');
+            // Only create/connect client for primary tabs
+            console.log(`🔍 Checking LightstreamerClient creation conditions...`);
+            console.log(`🔍 tabRole: "${tabRole}", shouldConnect: ${shouldConnect}`);
+            console.log(`🔍 Condition check: tabRole === 'primary' && shouldConnect = ${tabRole === 'primary' && shouldConnect}`);
+            
+            if (tabRole === 'primary' && shouldConnect) {
+                // Additional validation: ensure role was explicitly set
+                const dataElement = document.getElementById('ls-watchlist-data');
+                const explicitRole = dataElement?.getAttribute('data-tab-role');
+                const explicitConnect = dataElement?.getAttribute('data-should-connect');
+                
+                console.log(`🔍 Explicit validation - role: "${explicitRole}", connect: "${explicitConnect}"`);
+                console.log(`🔍 Validation check: !explicitRole || !explicitConnect = ${!explicitRole || !explicitConnect}`);
+                
+                if (!explicitRole || !explicitConnect) {
+                    console.error('❌ Role attributes not properly set by content script!');
+                    console.error('❌ This suggests a timing issue or content script failure');
+                    console.error('❌ Refusing to create LightstreamerClient to prevent duplicates');
+                    setupSubscriptions(null);
+                    return;
+                }
+                
+                console.log('🔧 Creating new LightstreamerClient (PRIMARY TAB)...');
+                console.log('🔧 Validated role attributes:', { explicitRole, explicitConnect });
+                
+                // Double-check no other tab has created a client in the meantime
+                if (window.lsClient) {
+                    console.log('⚠️ LightstreamerClient already exists, becoming secondary');
+                    tabRole = 'secondary';
+                    shouldConnect = false;
+                    setupSubscriptions(window.lsClient);
+                    return;
+                }
+                
+                client = new LightstreamerClient("https://push.ls-tc.de:443", "WALLSTREETONLINE");
+                
+                // Store reference for future use
+                window.lsClient = client;
+                
+                // Connect the client
+                if (client.connect) {
+                    client.connect();
+                    console.log('🔌 LightstreamerClient connecting...');
+                }
+            } else {
+                console.log('📱 Secondary tab or waiting for promotion - not creating LightstreamerClient');
+                // Still setup subscriptions for chart display
+                setupSubscriptions(null);
+                return;
             }
         }
         
-        console.log('🎯 LightstreamerClient integration starting...');
+        console.log(`🎯 LightstreamerClient integration starting (${tabRole} tab)...`);
         setupSubscriptions(client);
     }
     
@@ -785,7 +865,32 @@
             const instrumentInfo = extractInstrumentInfo();
             console.log('📋 Instrument data:', instrumentInfo);
             
-            // Wait for client to be connected
+            // Always initialize chart for current page instrument (both primary and secondary)
+            if (instrumentInfo.currentPageInstrument && !realtimeChart) {
+                const chartId = `realtime-chart-${instrumentInfo.currentPageInstrument.isin}`;
+                realtimeChart = new RealtimeChart(chartId, instrumentInfo.currentPageInstrument);
+                console.log(`📊 Real-time chart initialized for current page (${tabRole} tab):`, instrumentInfo.currentPageInstrument.name);
+            } else if (realtimeChart) {
+                console.log('📊 Real-time chart already exists, skipping creation');
+            } else {
+                console.log('📊 No chart created - current page instrument not in watchlist');
+            }
+            
+            if (tabRole === 'secondary' || !client) {
+                console.log('📱 Secondary tab or no client - listening for events from primary tab via background script');
+                setupSecondaryTabListeners(instrumentInfo);
+                return; // Don't connect to LightStream
+            }
+            
+            if (!shouldConnect) {
+                console.log('⚠️ Primary tab but shouldConnect is false - waiting for promotion');
+                setupSecondaryTabListeners(instrumentInfo); // Listen for promotion messages
+                return;
+            }
+            
+            console.log('� Primary tab - connecting to LightStream...');
+            
+            // Wait for client to be connected (PRIMARY TAB ONLY)
             const checkConnection = () => {
                 const status = client.getStatus();
                 console.log('📊 Client status:', status);
@@ -793,17 +898,6 @@
                 if (status.includes('CONNECTED') && (status.includes('STREAMING') || status.includes('POLLING'))) {
                     console.log('🎉 Connected! Setting up our subscriptions...');
                     initializeLightstreamerSubscriptions(client, instrumentInfo);
-                    
-                    // Initialize real-time chart ONLY for the current page's instrument
-                    if (instrumentInfo.currentPageInstrument && !realtimeChart) {
-                        const chartId = `realtime-chart-${instrumentInfo.currentPageInstrument.isin}`;
-                        realtimeChart = new RealtimeChart(chartId, instrumentInfo.currentPageInstrument);
-                        console.log('📊 Real-time chart initialized for current page:', instrumentInfo.currentPageInstrument.name);
-                    } else if (realtimeChart) {
-                        console.log('📊 Real-time chart already exists, skipping creation');
-                    } else {
-                        console.log('📊 No chart created - current page instrument not in watchlist');
-                    }
                 } else if (status === 'DISCONNECTED') {
                     console.log('🔄 Client disconnected, will retry...');
                     setTimeout(checkConnection, 2000);
@@ -1035,6 +1129,56 @@
         client.subscribe(pushtableSubscription);
         
         console.log('✅ Lightstreamer subscriptions initialized successfully!');
+    }
+    
+    // Setup listeners for secondary tabs to receive events from primary tab
+    function setupSecondaryTabListeners(instrumentInfo) {
+        console.log('📱 Setting up secondary tab event listeners...');
+        
+        // Register this secondary tab with the background script, including instrument info
+        if (instrumentInfo && instrumentInfo.currentPageInstrument) {
+            console.log('📱 Registering secondary tab with background script:', instrumentInfo.currentPageInstrument);
+            window.postMessage({
+                type: 'LS_TICKER_SECONDARY_REGISTER',
+                instrumentInfo: instrumentInfo.currentPageInstrument
+            }, '*');
+        } else {
+            console.warn('⚠️ Cannot register secondary tab - no instrument info available');
+        }
+        
+        // Listen for events from content script (broadcasted from background)
+        window.addEventListener('message', (event) => {
+            if (event.source !== window) return;
+            
+            if (event.data.type === 'LS_TICKER_SECONDARY_EVENT') {
+                const eventData = event.data.data;
+                console.log('📱 Secondary tab received event:', eventData);
+                
+                // Process the event for chart updates only
+                if (eventData.eventType === 'TRADE' && realtimeChart) {
+                    const tradeData = eventData.event;
+                    if (realtimeChart.instrumentInfo.isin === tradeData.isin) {
+                        console.log('📊 Updating chart with trade data from primary tab');
+                        realtimeChart.addTradeData(tradeData.price, tradeData.size, tradeData.direction.toLowerCase(), tradeData.ts);
+                    }
+                } else if (eventData.eventType === 'QUOTE' && realtimeChart) {
+                    const quoteData = eventData.event;
+                    if (realtimeChart.instrumentInfo.isin === quoteData.isin) {
+                        console.log('📊 Updating chart with quote data from primary tab');
+                        realtimeChart.addPriceData(quoteData.price, quoteData.ts);
+                    }
+                }
+            } else if (event.data.type === 'LS_TICKER_START_CONNECTION') {
+                console.log('👑 Secondary tab promoted to primary - starting LightStream connection');
+                tabRole = 'primary';
+                shouldConnect = true;
+                
+                // Restart the initialization process as primary
+                setTimeout(() => {
+                    initializeLightstreamerIntegration();
+                }, 1000);
+            }
+        });
     }
     
     // Start initialization
