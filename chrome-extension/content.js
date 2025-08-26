@@ -11,6 +11,47 @@ class LSContentScript {
         this.shouldConnect = false;
     }
 
+    // Helper method for robust messaging with retry logic
+    async sendMessageWithRetry(message, retryCount = 0) {
+        return new Promise((resolve, reject) => {
+            try {
+                if (!chrome.runtime?.id) {
+                    console.log('⚠️ Extension context invalidated');
+                    reject(new Error('Extension context invalidated'));
+                    return;
+                }
+
+                chrome.runtime.sendMessage(message, (response) => {
+                    if (chrome.runtime.lastError) {
+                        if (chrome.runtime.lastError.message?.includes('Extension context invalidated')) {
+                            console.log('⚠️ Extension context invalidated');
+                            reject(new Error('Extension context invalidated'));
+                        } else if (chrome.runtime.lastError.message?.includes('receiving end does not exist')) {
+                            if (retryCount < 2) {
+                                console.log(`🔄 Service worker appears suspended, retrying... (attempt ${retryCount + 1})`);
+                                setTimeout(() => {
+                                    this.sendMessageWithRetry(message, retryCount + 1).then(resolve).catch(reject);
+                                }, 500);
+                                return;
+                            } else {
+                                console.log('🔌 Service worker unavailable after retries');
+                                reject(new Error('Service worker unavailable'));
+                            }
+                        } else {
+                            console.error('❌ Runtime error:', chrome.runtime.lastError.message || chrome.runtime.lastError);
+                            reject(chrome.runtime.lastError);
+                        }
+                    } else {
+                        resolve(response);
+                    }
+                });
+            } catch (error) {
+                console.error('❌ Failed to send message:', error.message || error);
+                reject(error);
+            }
+        });
+    }
+
     async init() {
         // Check if we're on the correct domain
         if (!this.isValidDomain()) {
@@ -76,71 +117,43 @@ class LSContentScript {
     }
 
     async hasOtherLsTcTabs() {
-        return new Promise((resolve, reject) => {
-            try {
-                // Ask background script to check for other ls-tc.de tabs
-                chrome.runtime.sendMessage({
-                    action: 'checkOtherLsTcTabs',
-                    currentUrl: window.location.href
-                }, (response) => {
-                    if (chrome.runtime.lastError) {
-                        console.error('❌ Failed to check other tabs:', chrome.runtime.lastError);
-                        resolve(false); // Allow injection if we can't check
-                        return;
-                    }
-                    
-                    if (response && response.hasOtherTabs) {
-                        console.log(`⚠️ Found ${response.otherTabsCount} other ls-tc.de tab(s)`);
-                        resolve(true);
-                    } else {
-                        resolve(false);
-                    }
-                });
-            } catch (error) {
-                console.error('❌ Failed to check other tabs:', error);
-                resolve(false); // Allow injection if we can't check
+        try {
+            // Ask background script to check for other ls-tc.de tabs
+            const response = await this.sendMessageWithRetry({
+                action: 'checkOtherLsTcTabs',
+                currentUrl: window.location.href
+            });
+            
+            if (response && response.hasOtherTabs) {
+                console.log(`⚠️ Found ${response.otherTabsCount} other ls-tc.de tab(s)`);
+                return true;
+            } else {
+                return false;
             }
-        });
+        } catch (error) {
+            console.error('❌ Failed to check other tabs:', error);
+            return false; // Allow injection if we can't check
+        }
     }
 
     async requestTabRole() {
-        return new Promise((resolve, reject) => {
-            try {
-                console.log('📋 Requesting tab role from background script...');
-                
-                // Set a timeout to prevent hanging
-                const timeout = setTimeout(() => {
-                    console.warn('⚠️ Tab role request timed out, using default');
-                    resolve({ role: 'primary', shouldConnect: true });
-                }, 5000); // 5 second timeout
-                
-                chrome.runtime.sendMessage(
-                    { action: 'requestTabRole' },
-                    (response) => {
-                        clearTimeout(timeout);
-                        console.log('📋 Received tab role response:', response);
-                        
-                        if (chrome.runtime.lastError) {
-                            console.error('❌ Chrome runtime error:', chrome.runtime.lastError);
-                            // Don't reject, use fallback instead
-                            resolve({ role: 'primary', shouldConnect: true });
-                            return;
-                        }
-                        
-                        if (!response) {
-                            console.warn('⚠️ Received undefined response from background script');
-                            resolve({ role: 'primary', shouldConnect: true });
-                            return;
-                        }
-                        
-                        resolve(response);
-                    }
-                );
-            } catch (error) {
-                console.error('❌ Failed to request tab role:', error);
-                resolve({ role: 'primary', shouldConnect: true }); // Default to primary if error
+        try {
+            console.log('📋 Requesting tab role from background script...');
+            
+            const response = await this.sendMessageWithRetry({ action: 'requestTabRole' });
+            console.log('📋 Received tab role response:', response);
+            
+            if (!response) {
+                console.warn('⚠️ Received undefined response from background script, using fallback');
+                return { role: 'primary', shouldConnect: true };
             }
-        });
+            
+            return response;
+        } catch (error) {
+            console.error('❌ Failed to request tab role:', error);
+            // Use fallback role to prevent blocking
+            return { role: 'primary', shouldConnect: true };
+        }
     }
 
     handleBackgroundMessage(message, sender, sendResponse) {
@@ -273,7 +286,7 @@ class LSContentScript {
         this.sendToBackground(enhancedEvent);
     }
 
-    async sendToBackground(eventData) {
+    async sendToBackground(eventData, retryCount = 0) {
         return new Promise((resolve) => {
             try {
                 // Check if extension context is still valid
@@ -285,10 +298,18 @@ class LSContentScript {
 
                 chrome.runtime.sendMessage(eventData, (response) => {
                     if (chrome.runtime.lastError) {
-                        if (chrome.runtime.lastError.message?.includes('Extension context invalidated') || 
-                            chrome.runtime.lastError.message?.includes('receiving end does not exist')) {
-                            console.log('⚠️ Extension context invalidated or background script unavailable');
-                            console.log('💡 Please reload the page after extension updates');
+                        if (chrome.runtime.lastError.message?.includes('Extension context invalidated')) {
+                            console.log('⚠️ Extension context invalidated - please reload the page after extension updates');
+                        } else if (chrome.runtime.lastError.message?.includes('receiving end does not exist')) {
+                            if (retryCount < 2) {
+                                console.log(`🔄 Service worker appears suspended, retrying event send... (attempt ${retryCount + 1})`);
+                                setTimeout(() => {
+                                    this.sendToBackground(eventData, retryCount + 1).then(resolve);
+                                }, 500);
+                                return;
+                            } else {
+                                console.log('� Service worker unavailable after retries - event will be lost');
+                            }
                         } else {
                             console.error('❌ Failed to send event to background:', chrome.runtime.lastError.message || chrome.runtime.lastError);
                         }
@@ -305,65 +326,47 @@ class LSContentScript {
     }
 
     async registerSecondaryTab(instrumentInfo) {
-        return new Promise((resolve, reject) => {
-            try {
-                console.log('📱 Registering secondary tab with background script...');
-                
-                chrome.runtime.sendMessage({
-                    action: 'registerSecondaryTab',
-                    instrumentInfo: instrumentInfo
-                }, (response) => {
-                    if (chrome.runtime.lastError) {
-                        console.error('❌ Failed to register secondary tab:', chrome.runtime.lastError.message || chrome.runtime.lastError);
-                        reject(chrome.runtime.lastError);
-                        return;
-                    }
-                    
-                    if (!response) {
-                        console.warn('⚠️ Received undefined response from background script');
-                        resolve({ status: 'unknown' });
-                        return;
-                    }
-                    
-                    console.log('✅ Secondary tab registered successfully:', response);
-                    resolve(response);
-                });
-            } catch (error) {
-                console.error('❌ Error registering secondary tab:', error.message || error);
-                reject(error);
+        try {
+            console.log('📱 Registering secondary tab with background script...');
+            
+            const response = await this.sendMessageWithRetry({
+                action: 'registerSecondaryTab',
+                instrumentInfo: instrumentInfo
+            });
+            
+            if (!response) {
+                console.warn('⚠️ Received undefined response from background script');
+                return { status: 'unknown' };
             }
-        });
+            
+            console.log('✅ Secondary tab registered successfully:', response);
+            return response;
+        } catch (error) {
+            console.error('❌ Error registering secondary tab:', error.message || error);
+            throw error;
+        }
     }
 
     async registerPrimaryTab(instrumentInfo) {
-        return new Promise((resolve, reject) => {
-            try {
-                console.log('👑 Registering primary tab with background script...');
-                
-                chrome.runtime.sendMessage({
-                    action: 'registerPrimaryTab',
-                    instrumentInfo: instrumentInfo
-                }, (response) => {
-                    if (chrome.runtime.lastError) {
-                        console.error('❌ Failed to register primary tab:', chrome.runtime.lastError.message || chrome.runtime.lastError);
-                        reject(chrome.runtime.lastError);
-                        return;
-                    }
-                    
-                    if (!response) {
-                        console.warn('⚠️ Received undefined response from background script');
-                        resolve({ status: 'unknown' });
-                        return;
-                    }
-                    
-                    console.log('✅ Primary tab registered successfully:', response);
-                    resolve(response);
-                });
-            } catch (error) {
-                console.error('❌ Error registering primary tab:', error.message || error);
-                reject(error);
+        try {
+            console.log('👑 Registering primary tab with background script...');
+            
+            const response = await this.sendMessageWithRetry({
+                action: 'registerPrimaryTab',
+                instrumentInfo: instrumentInfo
+            });
+            
+            if (!response) {
+                console.warn('⚠️ Received undefined response from background script');
+                return { status: 'unknown' };
             }
-        });
+            
+            console.log('✅ Primary tab registered successfully:', response);
+            return response;
+        } catch (error) {
+            console.error('❌ Error registering primary tab:', error.message || error);
+            throw error;
+        }
     }
 }
 

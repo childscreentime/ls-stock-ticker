@@ -36,36 +36,6 @@ body {
     margin: 0;
 }
 
-.connection-status {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 12px;
-    opacity: 0.9;
-}
-
-.connection-status .status-indicator {
-    font-size: 14px;
-}
-
-.connection-status.connected .status-indicator {
-    color: #4CAF50;
-}
-
-.connection-status.connecting .status-indicator {
-    color: #FFC107;
-    animation: pulse 2s infinite;
-}
-
-.connection-status.disconnected .status-indicator {
-    color: #F44336;
-}
-
-@keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.5; }
-}
-
 .header-actions {
     display: flex;
     gap: 8px;

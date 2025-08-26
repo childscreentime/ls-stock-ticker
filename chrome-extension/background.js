@@ -13,6 +13,8 @@ class BackgroundService {
         this.recentTrades = []; // Store last 20 trade events for popup
         this.latestQuotes = new Map(); // Store latest quote for each WKN
         this.maxTrades = 20;
+        this.maxQuoteAge = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+        this.persistEventsTimeout = null; // For debouncing persist operations
         
         // Primary/Secondary tab management
         this.primaryTabId = null; // The tab that maintains LightStream connection
@@ -33,6 +35,10 @@ class BackgroundService {
         
         // Restore persisted tab state
         await this.restoreTabState();
+        
+        // Restore persisted events data
+        await this.restoreEventsData();
+        
         this.stateRestored = true;
         console.log('✅ Tab state restoration complete');
         
@@ -58,7 +64,17 @@ class BackgroundService {
         // Handle new tab creation to detect when users open ls-tc.de pages
         chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => this.onTabUpdated(tabId, changeInfo, tab));
         
+        // Ensure data is persisted on service worker suspension
+        // Service workers can be suspended without warning, so we use debounced persistence
+        
         await this.setupWatchlistTabs();
+        
+        // Ensure any existing data is persisted immediately after initialization
+        if (this.recentTrades.length > 0 || this.latestQuotes.size > 0) {
+            await this.persistEventsData();
+        }
+        
+        console.log('✅ LS Stock Ticker Background Service initialized');
     }
     
     async restoreTabState() {
@@ -156,6 +172,70 @@ class BackgroundService {
         } catch (error) {
             console.error('❌ Failed to persist tab state:', error);
         }
+    }
+
+    async restoreEventsData() {
+        try {
+            console.log('🔄 Restoring events data from storage...');
+            const result = await chrome.storage.local.get(['recentTrades', 'latestQuotes']);
+            
+            if (result.recentTrades && Array.isArray(result.recentTrades)) {
+                this.recentTrades = result.recentTrades;
+                console.log(`📋 Restored ${this.recentTrades.length} recent trades`);
+            } else {
+                console.log('🔍 No recent trades stored');
+            }
+            
+            if (result.latestQuotes && typeof result.latestQuotes === 'object') {
+                this.latestQuotes = new Map(Object.entries(result.latestQuotes));
+                console.log(`💰 Restored ${this.latestQuotes.size} latest quotes`);
+                
+                // Clean up old quotes
+                this.cleanupOldQuotes();
+            } else {
+                console.log('🔍 No latest quotes stored');
+            }
+        } catch (error) {
+            console.error('❌ Failed to restore events data:', error);
+        }
+    }
+
+    cleanupOldQuotes() {
+        const now = Date.now();
+        let cleanedCount = 0;
+        
+        for (const [wkn, quote] of this.latestQuotes.entries()) {
+            if (quote.timestamp && (now - quote.timestamp > this.maxQuoteAge)) {
+                this.latestQuotes.delete(wkn);
+                cleanedCount++;
+            }
+        }
+        
+        if (cleanedCount > 0) {
+            console.log(`🧹 Cleaned up ${cleanedCount} old quotes`);
+        }
+    }
+
+    async persistEventsData() {
+        try {
+            await chrome.storage.local.set({
+                recentTrades: this.recentTrades,
+                latestQuotes: Object.fromEntries(this.latestQuotes)
+            });
+            console.log('💾 Events data persisted to storage');
+        } catch (error) {
+            console.error('❌ Failed to persist events data:', error);
+        }
+    }
+
+    // Debounced version to avoid too frequent storage writes
+    persistEventsDataDebounced() {
+        if (this.persistEventsTimeout) {
+            clearTimeout(this.persistEventsTimeout);
+        }
+        this.persistEventsTimeout = setTimeout(() => {
+            this.persistEventsData();
+        }, 1000); // Wait 1 second before persisting
     }
 
     async onInstalled() {
@@ -379,7 +459,7 @@ class BackgroundService {
         const eventWithTimestamp = {
             ...eventData,
             type: eventType,
-            timestamp: Date.now(),
+            timestamp: eventData.ts || Date.now(), // Use original trade timestamp, fallback to current time
             tabId: tab?.id
         };
         
@@ -390,10 +470,14 @@ class BackgroundService {
                 this.recentTrades.shift();
             }
             console.log(`📈 Trade event stored (${this.recentTrades.length}/${this.maxTrades})`);
+            // Persist trades data (debounced)
+            this.persistEventsDataDebounced();
         } else if (eventType === 'QUOTE' && eventData.wkn) {
             // Store latest quote for each instrument
             this.latestQuotes.set(eventData.wkn, eventWithTimestamp);
             console.log(`💰 Quote updated for WKN ${eventData.wkn}: ${eventData.price}`);
+            // Persist quotes data (debounced)
+            this.persistEventsDataDebounced();
         }
 
         // Check alert rules using the actual event data
@@ -691,7 +775,12 @@ class BackgroundService {
                     shouldConnect: true
                 });
             } catch (error) {
-                console.error(`❌ Failed to notify promoted tab ${oldestTabId}:`, error);
+                const isConnectionError = this.isTabConnectionError(error, oldestTabId, 'notify promoted tab');
+                if (isConnectionError) {
+                    // Clean up the failed promotion
+                    this.primaryTabId = null;
+                    this.lsTcTabs.delete(oldestTabId);
+                }
             }
         } else {
             console.log(`⚠️ No secondary tab available for promotion`);
@@ -742,7 +831,12 @@ class BackgroundService {
                 }
                 
             } catch (error) {
-                console.error(`❌ Failed to broadcast to secondary tab ${tabId}:`, error);
+                const isConnectionError = this.isTabConnectionError(error, tabId, 'broadcast event');
+                if (isConnectionError) {
+                    // Connection error - just clean up the tab
+                } else {
+                    // Other error - already logged by utility method
+                }
                 console.log(`🗑️ Removing failed secondary tab ${tabId}`);
                 this.secondaryTabs.delete(tabId);
                 this.lsTcTabs.delete(tabId);
@@ -801,6 +895,24 @@ class BackgroundService {
         }
         
         return !hasErrors;
+    }
+
+    /**
+     * Utility method to handle tab messaging errors consistently
+     * @param {Error} error - The error that occurred during tab messaging
+     * @param {number} tabId - The tab ID that failed
+     * @param {string} operation - Description of the operation that failed
+     * @returns {boolean} - True if the error is a connection error (tab closed/navigated)
+     */
+    isTabConnectionError(error, tabId, operation) {
+        if (error.message?.includes('Could not establish connection') || 
+            error.message?.includes('Receiving end does not exist')) {
+            console.log(`🔌 Tab ${tabId} connection lost during ${operation} (tab closed or navigated away)`);
+            return true;
+        } else {
+            console.error(`❌ Failed to ${operation} for tab ${tabId}:`, error);
+            return false;
+        }
     }
 
 }
