@@ -21,6 +21,10 @@
     let tabRole = null; // Will be set from content script data
     let shouldConnect = null; // Will be set from content script data
     
+    // Subscription tracking to prevent leaks
+    let quoteSubscription = null;
+    let pushtableSubscription = null;
+    
     // Trading Event Handler
     class TradingEventHandler {
         constructor() {
@@ -837,6 +841,12 @@
                     return;
                 }
                 
+                // Disconnect any existing client to prevent connection leaks
+                if (window.lsClient && window.lsClient.disconnect) {
+                    console.log('🔌 Disconnecting existing LightstreamerClient to prevent leaks');
+                    window.lsClient.disconnect();
+                }
+                
                 client = new LightstreamerClient("https://push.ls-tc.de:443", "WALLSTREETONLINE");
                 
                 // Store reference for future use
@@ -1004,8 +1014,21 @@
         const quoteFieldList = ["instrumentId", "isin", "displayName", "trade", "bid", "ask", "tradeTime", "bidTime", "askTime", "tradeSize", "bidSize", "askSize", "categoryId", "currencySymbol", "currencyISO"];
         const pushtableFieldList = ["ask", "askTime", "askSize", "bid", "bidTime", "bidSize", "trade", "tradeTime", "tradeSize", "currencySymbol", "categoryId"];
         
+        // Clean up existing subscriptions to prevent leaks
+        if (quoteSubscription && client.unsubscribe) {
+            console.log('🧹 Unsubscribing existing QUOTES subscription to prevent leaks');
+            client.unsubscribe(quoteSubscription);
+            quoteSubscription = null;
+        }
+        
+        if (pushtableSubscription && client.unsubscribe) {
+            console.log('🧹 Unsubscribing existing PUSHTABLE subscription to prevent leaks');
+            client.unsubscribe(pushtableSubscription);
+            pushtableSubscription = null;
+        }
+        
         // QUOTES subscription (for price tracking)
-        const quoteSubscription = new Subscription("MERGE", itemList, quoteFieldList);
+        quoteSubscription = new Subscription("MERGE", itemList, quoteFieldList);
         
         quoteSubscription.addListener({
             onSubscription: function() {
@@ -1060,7 +1083,7 @@
         client.subscribe(quoteSubscription);
         
         // PUSHTABLE subscription (for trade executions only - quotes handled by QUOTE subscription)
-        const pushtableSubscription = new Subscription("MERGE", itemList, pushtableFieldList);
+        pushtableSubscription = new Subscription("MERGE", itemList, pushtableFieldList);
         
         pushtableSubscription.addListener({
             onSubscription: function() {
@@ -1192,5 +1215,46 @@
     
     // Start initialization
     initializeLightstreamerIntegration();
+    
+    // Cleanup function to prevent connection leaks
+    function cleanup() {
+        console.log('🧹 Cleaning up LightStreamer connections...');
+        
+        // Unsubscribe from existing subscriptions
+        if (window.lsClient && window.lsClient.unsubscribe) {
+            if (quoteSubscription) {
+                console.log('🧹 Unsubscribing from QUOTES subscription');
+                window.lsClient.unsubscribe(quoteSubscription);
+                quoteSubscription = null;
+            }
+            
+            if (pushtableSubscription) {
+                console.log('🧹 Unsubscribing from PUSHTABLE subscription');
+                window.lsClient.unsubscribe(pushtableSubscription);
+                pushtableSubscription = null;
+            }
+        }
+        
+        if (window.lsClient && window.lsClient.disconnect) {
+            console.log('🔌 Disconnecting LightstreamerClient');
+            window.lsClient.disconnect();
+            window.lsClient = null;
+        }
+        
+        if (realtimeChart) {
+            console.log('📊 Destroying real-time chart');
+            realtimeChart.destroy();
+            realtimeChart = null;
+        }
+        
+        console.log('✅ Cleanup completed');
+    }
+    
+    // Register cleanup handlers for page unload
+    window.addEventListener('beforeunload', cleanup);
+    window.addEventListener('pagehide', cleanup);
+    
+    // Also cleanup when the extension context is invalidated
+    window.addEventListener('unload', cleanup);
     
 })();
