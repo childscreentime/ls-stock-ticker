@@ -64,6 +64,9 @@ class BackgroundService {
         // Handle new tab creation to detect when users open ls-tc.de pages
         chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => this.onTabUpdated(tabId, changeInfo, tab));
         
+        // Handle notification clicks to navigate to relevant tab
+        chrome.notifications.onClicked.addListener((notificationId) => this.onNotificationClicked(notificationId));
+        
         // Ensure data is persisted on service worker suspension
         // Service workers can be suspended without warning, so we use debounced persistence
         
@@ -510,6 +513,8 @@ class BackgroundService {
     }
 
     async showNotification(alert) {
+        // Encode ISIN in notification ID for easy lookup
+        const notificationId = `${alert.isin}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
         const options = {
             type: 'basic',
             iconUrl: 'icons/icon-48.png',
@@ -519,7 +524,7 @@ class BackgroundService {
         };
 
         try {
-            await chrome.notifications.create(`alert_${Date.now()}`, options);
+            await chrome.notifications.create(notificationId, options);
             console.log('🔔 Notification sent:', alert.message);
         } catch (error) {
             console.error('❌ Failed to send notification:', error);
@@ -529,6 +534,53 @@ class BackgroundService {
     async toggleAlerts(wkn, enabled) {
         await this.config.updateAlertRule(wkn, { enabled });
         console.log(`🔔 Alerts ${enabled ? 'enabled' : 'disabled'} for ${wkn}`);
+    }
+
+    async onNotificationClicked(notificationId) {
+        console.log('🔔 Notification clicked:', notificationId);
+        
+        // Extract ISIN/WKN from notification ID (format: "ISIN_timestamp_random")
+        const instrumentIdentifier = notificationId.split('_')[0];
+        if (!instrumentIdentifier) {
+            console.warn('⚠️ Could not extract instrument identifier from notification ID:', notificationId);
+            return;
+        }
+        
+        console.log('🔍 Looking for tabs with instrument identifier:', instrumentIdentifier);
+        
+        // Find a tab that matches this instrument (by ISIN or WKN)
+        let targetTabId = null;
+        let instrumentInfo = null;
+        
+        // Search through registered tabs for exact matches
+        for (const [tabId, tabInfo] of this.lsTcTabs) {
+            if (tabInfo.instrumentInfo && 
+                (tabInfo.instrumentInfo.isin === instrumentIdentifier)) {
+                targetTabId = tabId;
+                instrumentInfo = tabInfo.instrumentInfo;
+                console.log(`✅ Found exact match in registered tab ${tabId}: ${instrumentInfo.name}`);
+                break;
+            }
+        }
+        
+        if (targetTabId) {
+            try {
+                // Activate the tab and bring it to focus
+                await chrome.tabs.update(targetTabId, { active: true });
+                
+                // Also bring the window to focus
+                const tab = await chrome.tabs.get(targetTabId);
+                if (tab.windowId) {
+                    await chrome.windows.update(tab.windowId, { focused: true });
+                }
+                
+                console.log(`✅ Navigated to tab ${targetTabId} for instrument ${instrumentIdentifier}`);
+            } catch (error) {
+                console.error('❌ Failed to navigate to tab:', error);
+            }
+        } else {
+            console.warn(`⚠️ No tab found for instrument ${instrumentIdentifier}`);
+        }
     }
 
     async getTabStatus() {

@@ -50,6 +50,7 @@ export class AlertManager {
             alerts.push({
                 type: 'large_trade',
                 wkn: event.wkn,
+                isin: event.isin,
                 instrumentName: event.name,
                 message: `Large trade: ${size} shares at €${price.toFixed(2)} (€${notionalValue.toLocaleString()})`,
                 priority: 2,
@@ -62,6 +63,7 @@ export class AlertManager {
             alerts.push({
                 type: 'aggressive_trade',
                 wkn: event.wkn,
+                isin: event.isin,
                 instrumentName: event.name,
                 message: `${side.toUpperCase()} trade: ${size} shares at €${price.toFixed(2)}`,
                 priority: 1,
@@ -74,6 +76,7 @@ export class AlertManager {
             alerts.push({
                 type: 'volume_threshold',
                 wkn: event.wkn,
+                isin: event.isin,
                 instrumentName: event.name,
                 message: `High volume trade: ${size} shares (threshold: ${rules.volumeThreshold})`,
                 priority: 1,
@@ -98,6 +101,7 @@ export class AlertManager {
                 alerts.push({
                     type: 'wide_spread',
                     wkn: event.wkn,
+                    isin: event.isin,
                     instrumentName: event.name,
                     message: `Wide spread: ${spreadPercent.toFixed(2)}% (€${bid.toFixed(2)} - €${ask.toFixed(2)})`,
                     priority: 0,
@@ -123,6 +127,7 @@ export class AlertManager {
             alerts.push({
                 type: 'price_upper_threshold',
                 wkn: event.wkn,
+                isin: event.isin,
                 instrumentName: event.name,
                 message: `Price above threshold: €${checkPrice.toFixed(2)} >= €${rules.priceThresholds.upper}`,
                 priority: 2,
@@ -135,6 +140,7 @@ export class AlertManager {
             alerts.push({
                 type: 'price_lower_threshold',
                 wkn: event.wkn,
+                isin: event.isin,
                 instrumentName: event.name,
                 message: `Price below threshold: €${checkPrice.toFixed(2)} <= €${rules.priceThresholds.lower}`,
                 priority: 2,
