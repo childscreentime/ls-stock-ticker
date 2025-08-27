@@ -53,10 +53,7 @@ class BackgroundService {
         chrome.runtime.onMessage.addListener((message, sender, sendResponse) => 
             this.handleMessage(message, sender, sendResponse)
         );
-        
-        // Set up periodic tab health check
-        chrome.alarms.onAlarm.addListener((alarm) => this.handleAlarm(alarm));
-        chrome.alarms.create('tabHealthCheck', { periodInMinutes: 15 });
+    
         
         // Handle tab removal
         chrome.tabs.onRemoved.addListener((tabId) => this.onTabRemoved(tabId));
@@ -67,10 +64,6 @@ class BackgroundService {
         // Handle notification clicks to navigate to relevant tab
         chrome.notifications.onClicked.addListener((notificationId) => this.onNotificationClicked(notificationId));
         
-        // Ensure data is persisted on service worker suspension
-        // Service workers can be suspended without warning, so we use debounced persistence
-        
-        await this.setupWatchlistTabs();
         
         // Ensure any existing data is persisted immediately after initialization
         if (this.recentTrades.length > 0 || this.latestQuotes.size > 0) {
@@ -244,12 +237,10 @@ class BackgroundService {
     async onInstalled() {
         console.log('📦 Extension installed, setting up initial configuration...');
         await this.config.initializeDefaults();
-        await this.setupWatchlistTabs();
     }
 
     async onStartup() {
         console.log('🔄 Extension startup, verifying tabs...');
-        await this.setupWatchlistTabs();
     }
 
     handleMessage(message, sender, sendResponse) {
@@ -335,15 +326,6 @@ class BackgroundService {
                     });
                 return true; // Keep channel open
                 
-            } else if (message.action === 'checkOtherLsTcTabs') {
-                this.checkOtherLsTcTabs(message.currentUrl)
-                    .then(result => sendResponse(result))
-                    .catch(error => {
-                        console.error('❌ Error checking other tabs:', error);
-                        sendResponse({ error: error.message });
-                    });
-                return true; // Keep channel open
-                
             } else if (message.type === 'HEALTH_CHECK') {
                 sendResponse({ status: 'ok', timestamp: Date.now() });
                 
@@ -357,13 +339,6 @@ class BackgroundService {
         }
         
         return false; // Synchronous response for unknown messages
-    }
-
-    async handleAlarm(alarm) {
-        if (alarm.name === 'tabHealthCheck') {
-            console.log('🏥 Running tab health check...');
-            await this.ensureWatchlistTabs();
-        }
     }
 
     onTabRemoved(tabId) {
@@ -396,56 +371,12 @@ class BackgroundService {
         }
     }
 
-    async checkOtherLsTcTabs(currentUrl) {
-        try {
-            // Query all tabs to find other ls-tc.de tabs
-            const allTabs = await chrome.tabs.query({});
-            const lsTcTabs = allTabs.filter(tab => 
-                tab.url && 
-                tab.url.includes('ls-tc.de') && 
-                tab.url !== currentUrl
-            );
-
-            return {
-                hasOtherTabs: lsTcTabs.length > 0,
-                otherTabsCount: lsTcTabs.length,
-                otherTabUrls: lsTcTabs.map(tab => tab.url)
-            };
-        } catch (error) {
-            console.error('❌ Failed to check other ls-tc.de tabs:', error);
-            return { hasOtherTabs: false, otherTabsCount: 0 };
-        }
-    }
-
     onTabUpdated(tabId, changeInfo, tab) {
         // Tab detection is now handled through tab registration
         // when content script injects and secondary tabs register
         if (changeInfo.status === 'complete' && tab.url && tab.url.includes('ls-tc.de/de/aktie/')) {
             console.log(`🆕 Detected ls-tc.de tab: ${tab.url} - waiting for tab registration`);
         }
-    }
-
-    async setupWatchlistTabs() {
-        console.log('🔍 Scanning for existing ls-tc.de tabs...');
-        await this.findExistingLSTabs();
-    }
-
-    async findExistingLSTabs() {
-        try {
-            // Query all open tabs for ls-tc.de
-            const tabs = await chrome.tabs.query({ url: "https://www.ls-tc.de/*" });
-            console.log(`🔍 Found ${tabs.length} existing ls-tc.de tabs - waiting for them to register`);
-            
-            // No longer extract instrument info from URLs
-            // Tabs will register themselves when content script loads
-        } catch (error) {
-            console.error('❌ Failed to scan existing tabs:', error);
-        }
-    }
-
-    async ensureWatchlistTabs() {
-        console.log('🏥 Health check: Scanning for ls-tc.de tabs...');
-        await this.findExistingLSTabs();
     }
 
     async processLightstreamerEvent(message, tab) {
