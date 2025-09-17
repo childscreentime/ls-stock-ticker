@@ -155,15 +155,168 @@
             this.chart = null;
             this.lineSeries = null;
             this.volumeSeries = null; // For trade volume bars
+            this.emaSeries = null; // EMA line series
+            this.smaSeries = null; // SMA line series
             this.priceData = []; // Array of {time, value}
+            this.candleData = []; // Array of {time, open, high, low, close} for moving averages
             this.volumeData = []; // Array of {time, value, color}
+            this.emaData = []; // Array of {time, value} for EMA
+            this.smaData = []; // Array of {time, value} for SMA
             this.isLibraryLoaded = false;
             this.tradeTooltipData = new Map(); // Store trade data for tooltips
+            
+            // Moving average periods
+            this.emaPeriod = 20;
+            this.smaPeriod = 50;
             
             // Clean up any existing chart with the same ID before creating new one
             this.cleanupExistingChart();
             
             this.init();
+        }
+        
+        /**
+         * Calculate Simple Moving Average (SMA)
+         * @param {Array} data - Array of candle objects {time, open, high, low, close}
+         * @param {number} period - Number of periods for SMA calculation
+         * @returns {Array} Array of {time, value} objects
+         */
+        calculateSMA(data, period) {
+            const result = [];
+            
+            if (data.length < period) {
+                return result; // Not enough data
+            }
+            
+            for (let i = period - 1; i < data.length; i++) {
+                let sum = 0;
+                
+                // Sum the closing prices for the period
+                for (let j = i - period + 1; j <= i; j++) {
+                    sum += data[j].close;
+                }
+                
+                const average = sum / period;
+                result.push({
+                    time: data[i].time,
+                    value: average
+                });
+            }
+            
+            return result;
+        }
+        
+        /**
+         * Calculate Exponential Moving Average (EMA)
+         * @param {Array} data - Array of candle objects {time, open, high, low, close}
+         * @param {number} period - Number of periods for EMA calculation
+         * @returns {Array} Array of {time, value} objects
+         */
+        calculateEMA(data, period) {
+            const result = [];
+            
+            if (data.length < period) {
+                return result; // Not enough data
+            }
+            
+            // Calculate smoothing factor (alpha)
+            const alpha = 2 / (period + 1);
+            
+            // Start with SMA for the first EMA value
+            let sum = 0;
+            for (let i = 0; i < period; i++) {
+                sum += data[i].close;
+            }
+            
+            let ema = sum / period;
+            result.push({
+                time: data[period - 1].time,
+                value: ema
+            });
+            
+            // Calculate EMA for remaining data points
+            for (let i = period; i < data.length; i++) {
+                ema = (data[i].close * alpha) + (ema * (1 - alpha));
+                result.push({
+                    time: data[i].time,
+                    value: ema
+                });
+            }
+            
+            return result;
+        }
+        
+        /**
+         * Efficiently update moving averages for streaming data
+         * @param {Object} newCandle - New candle data {time, open, high, low, close}
+         */
+        updateMovingAverages(newCandle) {
+            // Add new candle to data
+            this.candleData.push(newCandle);
+            
+            // Keep only necessary data for calculations (twice the longest period for safety)
+            const maxDataPoints = Math.max(this.smaPeriod, this.emaPeriod) * 2;
+            if (this.candleData.length > maxDataPoints) {
+                this.candleData = this.candleData.slice(-maxDataPoints);
+            }
+            
+            // Update SMA efficiently
+            if (this.candleData.length >= this.smaPeriod) {
+                const latestSmaData = this.candleData.slice(-this.smaPeriod);
+                const sum = latestSmaData.reduce((acc, candle) => acc + candle.close, 0);
+                const smaValue = sum / this.smaPeriod;
+                
+                const smaPoint = {
+                    time: newCandle.time,
+                    value: smaValue
+                };
+                
+                this.smaData.push(smaPoint);
+                
+                // Keep SMA data manageable
+                if (this.smaData.length > 3600) { // Keep last hour of data
+                    this.smaData.shift();
+                }
+                
+                // Update SMA series
+                if (this.smaSeries) {
+                    this.smaSeries.update(smaPoint);
+                }
+            }
+            
+            // Update EMA efficiently
+            if (this.candleData.length >= this.emaPeriod) {
+                const alpha = 2 / (this.emaPeriod + 1);
+                let emaValue;
+                
+                if (this.emaData.length === 0) {
+                    // First EMA calculation - use SMA as starting point
+                    const initialData = this.candleData.slice(-this.emaPeriod);
+                    const sum = initialData.reduce((acc, candle) => acc + candle.close, 0);
+                    emaValue = sum / this.emaPeriod;
+                } else {
+                    // Incremental EMA calculation
+                    const previousEma = this.emaData[this.emaData.length - 1].value;
+                    emaValue = (newCandle.close * alpha) + (previousEma * (1 - alpha));
+                }
+                
+                const emaPoint = {
+                    time: newCandle.time,
+                    value: emaValue
+                };
+                
+                this.emaData.push(emaPoint);
+                
+                // Keep EMA data manageable
+                if (this.emaData.length > 3600) { // Keep last hour of data
+                    this.emaData.shift();
+                }
+                
+                // Update EMA series
+                if (this.emaSeries) {
+                    this.emaSeries.update(emaPoint);
+                }
+            }
         }
         
         cleanupExistingChart() {
@@ -264,9 +417,11 @@
             const legend = document.createElement('span');
             legend.innerHTML = `
                 <span style="color: #00ff88;">📈 Price Line</span> | 
-                <span style="color: #00ff00;">🟢 Buy Volume</span> | 
-                <span style="color: #ff0000;">🔴 Sell Volume</span> | 
-                <span style="color: #808080;">⬜ Unknown Volume</span>
+                <span style="color: #2196F3;">📊 EMA(${this.emaPeriod})</span> |
+                <span style="color: #FF9800;">📊 SMA(${this.smaPeriod})</span> |
+                <span style="color: #00ff00;">🟢 Buy</span> | 
+                <span style="color: #ff0000;">🔴 Sell</span> | 
+                <span style="color: #808080;">⬜ Unknown</span>
             `;
             
             controls.appendChild(info);
@@ -336,6 +491,30 @@
                 this.lineSeries = this.chart.addLineSeries({
                     color: '#ff00ff',
                     lineWidth: 2,
+                    priceFormat: {
+                        type: 'price',
+                        precision: 2,
+                        minMove: 0.01,
+                    },
+                });
+                
+                // Add EMA line series (20-period, blue)
+                this.emaSeries = this.chart.addLineSeries({
+                    color: '#2196F3', // Blue
+                    lineWidth: 2,
+                    lineStyle: 0, // Solid line
+                    priceFormat: {
+                        type: 'price',
+                        precision: 2,
+                        minMove: 0.01,
+                    },
+                });
+                
+                // Add SMA line series (50-period, orange)
+                this.smaSeries = this.chart.addLineSeries({
+                    color: '#FF9800', // Orange
+                    lineWidth: 2,
+                    lineStyle: 0, // Solid line
                     priceFormat: {
                         type: 'price',
                         precision: 2,
@@ -428,9 +607,11 @@
             console.log(`  Chart Time: ${time}`);
             console.log(`  Will Display As: ${new Date(time * 1000).toUTCString()}`);
             
+            const priceValue = parseFloat(price);
+            
             const dataPoint = {
                 time: time,
-                value: parseFloat(price)
+                value: priceValue
             };
             
             // Add to our data array
@@ -446,8 +627,22 @@
                 index === 0 || item.time !== arr[index - 1].time
             );
             
-            // Update the chart
+            // Update the price series
             this.lineSeries.setData(uniqueData);
+            
+            // Create or update candle data for moving averages
+            // For simplicity, we'll use the price as open, high, low, and close
+            // We dont have OHLC data from L&S
+            const candleData = {
+                time: time,
+                open: priceValue,
+                high: priceValue,
+                low: priceValue,
+                close: priceValue
+            };
+            
+            // Update moving averages with new candle data
+            this.updateMovingAverages(candleData);
             
             console.log(`📊 Price data updated: €${price} at ${originalDate.toLocaleTimeString()}`);
         }
@@ -481,6 +676,22 @@
             priceRow.style.fontWeight = '500';
             legend.appendChild(priceRow);
             
+            // Create EMA row
+            const emaRow = document.createElement('div');
+            emaRow.innerHTML = `EMA(${this.emaPeriod}) <strong>--</strong>`;
+            emaRow.style.color = '#2196F3';
+            emaRow.style.fontSize = '12px';
+            emaRow.style.marginTop = '2px';
+            legend.appendChild(emaRow);
+            
+            // Create SMA row
+            const smaRow = document.createElement('div');
+            smaRow.innerHTML = `SMA(${this.smaPeriod}) <strong>--</strong>`;
+            smaRow.style.color = '#FF9800';
+            smaRow.style.fontSize = '12px';
+            smaRow.style.marginTop = '2px';
+            legend.appendChild(smaRow);
+            
             // Create volume row
             const volumeRow = document.createElement('div');
             volumeRow.innerHTML = `Volume <strong>--</strong>`;
@@ -497,6 +708,20 @@
                     let priceFormatted = '--';
                     if (priceData && priceData.value !== undefined) {
                         priceFormatted = `€${priceData.value.toFixed(2)}`;
+                    }
+                    
+                    // Get EMA data
+                    const emaData = param.seriesData.get(this.emaSeries);
+                    let emaFormatted = '--';
+                    if (emaData && emaData.value !== undefined) {
+                        emaFormatted = `€${emaData.value.toFixed(2)}`;
+                    }
+                    
+                    // Get SMA data
+                    const smaData = param.seriesData.get(this.smaSeries);
+                    let smaFormatted = '--';
+                    if (smaData && smaData.value !== undefined) {
+                        smaFormatted = `€${smaData.value.toFixed(2)}`;
                     }
                     
                     // Get volume data and trade information
@@ -538,10 +763,14 @@
                     
                     // Update legend
                     priceRow.innerHTML = `${this.instrumentInfo.name} <strong>${priceFormatted}</strong>`;
+                    emaRow.innerHTML = `EMA(${this.emaPeriod}) <strong>${emaFormatted}</strong>`;
+                    smaRow.innerHTML = `SMA(${this.smaPeriod}) <strong>${smaFormatted}</strong>`;
                     volumeRow.innerHTML = `Volume <strong style="color: ${volumeColor}">${volumeFormatted}</strong>`;
                 } else {
                     // Reset to default when not hovering
                     priceRow.innerHTML = `${this.instrumentInfo.name} <strong>--</strong>`;
+                    emaRow.innerHTML = `EMA(${this.emaPeriod}) <strong>--</strong>`;
+                    smaRow.innerHTML = `SMA(${this.smaPeriod}) <strong>--</strong>`;
                     volumeRow.innerHTML = `Volume <strong>--</strong>`;
                 }
             });
@@ -644,6 +873,8 @@
                 this.chart = null;
                 this.lineSeries = null;
                 this.volumeSeries = null;
+                this.emaSeries = null;
+                this.smaSeries = null;
             }
             
             const container = document.getElementById(this.containerId);
@@ -651,7 +882,15 @@
                 container.remove();
             }
             
-            console.log('📊 Chart destroyed');
+            // Clear data arrays
+            this.priceData = [];
+            this.candleData = [];
+            this.volumeData = [];
+            this.emaData = [];
+            this.smaData = [];
+            this.tradeTooltipData.clear();
+            
+            console.log('📊 Chart destroyed with moving averages cleanup');
         }
     }
     
