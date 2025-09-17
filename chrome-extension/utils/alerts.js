@@ -42,22 +42,6 @@ export class AlertManager {
         
         if (!price || !size) return alerts;
 
-        // Calculate notional value (assuming EUR)
-        const notionalValue = price * size;
-        
-        // Large trade alert
-        if (rules.minNotionalEUR && notionalValue >= rules.minNotionalEUR) {
-            alerts.push({
-                type: 'large_trade',
-                wkn: event.wkn,
-                isin: event.isin,
-                instrumentName: event.name,
-                message: `Large trade: ${size} shares at €${price.toFixed(2)} (€${notionalValue.toLocaleString()})`,
-                priority: 2,
-                data: { price, size, notionalValue, side }
-            });
-        }
-
         // Aggressive trade alert
         if (rules.highlightAggressive && (side === 'buy' || side === 'sell')) {
             alerts.push({
@@ -78,7 +62,7 @@ export class AlertManager {
                 wkn: event.wkn,
                 isin: event.isin,
                 instrumentName: event.name,
-                message: `High volume trade: ${size} shares (threshold: ${rules.volumeThreshold})`,
+                message: `High volume trade: ${side.toUpperCase()} ${size} shares (threshold: ${rules.volumeThreshold})`,
                 priority: 1,
                 data: { price, size, threshold: rules.volumeThreshold }
             });

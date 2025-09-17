@@ -14,7 +14,6 @@ export class StockConfig {
             alertRules: {
                 '918422': {
                     enabled: true,
-                    minNotionalEUR: 1000,
                     highlightAggressive: true,
                     priceThresholds: {
                         upper: null,

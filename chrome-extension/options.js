@@ -133,11 +133,6 @@ class OptionsController {
                             </label>
                         </div>
                         <div class="form-row">
-                            <label for="minNotional-${wkn}">Minimum notional value (EUR):</label>
-                            <input type="number" id="minNotional-${wkn}" class="min-notional" 
-                                   value="${rules.minNotionalEUR || ''}" placeholder="1000" step="100">
-                        </div>
-                        <div class="form-row">
                             <label for="volumeThreshold-${wkn}">Volume threshold (shares):</label>
                             <input type="number" id="volumeThreshold-${wkn}" class="volume-threshold" 
                                    value="${rules.volumeThreshold || ''}" placeholder="100" step="10">
@@ -230,7 +225,6 @@ class OptionsController {
                 // Initialize default alert rules
                 this.alertRules[instrument.wkn] = {
                     enabled: true,
-                    minNotionalEUR: 1000,
                     highlightAggressive: true,
                     volumeThreshold: 100,
                     priceThresholds: { upper: null, lower: null },
@@ -301,7 +295,6 @@ class OptionsController {
             
             rules[wkn] = {
                 enabled: card.querySelector('.rule-enabled').checked,
-                minNotionalEUR: parseFloat(card.querySelector('.min-notional').value) || null,
                 highlightAggressive: card.querySelector('.aggressive-trades').checked,
                 volumeThreshold: parseInt(card.querySelector('.volume-threshold').value) || null,
                 priceThresholds: {
